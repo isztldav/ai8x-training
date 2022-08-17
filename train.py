@@ -112,6 +112,7 @@ import nnplot
 import parse_qat_yaml
 import parsecmd
 import sample
+import yamlwriter
 from losses.multiboxloss import MultiBoxLoss
 from nas import parse_nas_yaml
 from utils import object_detection_utils, parse_obj_detection_yaml
@@ -392,6 +393,14 @@ def main():
     if args.summary:
         return summarize_model(model, args.dataset, which_summary=args.summary,
                                filename=args.summary_filename)
+    if args.yaml_template is not None:
+        return yamlwriter.create(
+            model,
+            args.dataset,
+            args.cnn,
+            filename=args.yaml_template,
+            qat_policy=qat_policy,
+        )
 
     activations_collectors = create_activation_stats_collectors(model, *args.activation_stats)
 
@@ -1485,6 +1494,8 @@ def evaluate_model(model, criterion, test_loader, loggers, activations_collector
 def summarize_model(model, dataset, which_summary, filename='model'):
     """summarize_model"""
     if which_summary.startswith('png'):
+        if which_summary == 'png_simplified':
+            ai8x.onnx_export_prep(model, simplify=True, remove_clamp=True)
         model_summaries.draw_img_classifier_to_file(model, filename + '.png', dataset,
                                                     which_summary == 'png_w_params')
     elif which_summary in ['onnx', 'onnx_simplified']:

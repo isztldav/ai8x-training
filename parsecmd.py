@@ -35,8 +35,8 @@ from distiller.utils import float_range_argparse_checker as float_range
 
 from devices import device
 
-SUMMARY_CHOICES = ['sparsity', 'compute', 'model', 'modules', 'png', 'png_w_params', 'onnx',
-                   'onnx_simplified']
+SUMMARY_CHOICES = ['sparsity', 'compute', 'model', 'modules', 'png', 'png_simplified',
+                   'png_w_params', 'onnx', 'onnx_simplified']
 
 
 def get_parser(model_names, dataset_names):
@@ -147,6 +147,8 @@ def get_parser(model_names, dataset_names):
                         ' | '.join(SUMMARY_CHOICES))
     parser.add_argument('--summary-filename', default='model',
                         help='file name (w/o extension) for the model summary (default: "model"')
+    parser.add_argument('--yaml-template', type=str, default=None, metavar='PATH',
+                        help='create a YAML template for the model')
 
     parser.add_argument('--compress', dest='compress', type=str, nargs='?', action='store',
                         help='configuration file for pruning the model '
