@@ -113,6 +113,7 @@ import nnplot
 import parse_qat_yaml
 import parsecmd
 import sample
+import yamlwriter
 from losses.multiboxloss import MultiBoxLoss
 from nas import parse_nas_yaml
 from utils import object_detection_utils, parse_obj_detection_yaml
@@ -398,6 +399,14 @@ def main():
     if args.summary:
         return summarize_model(model, args.dataset, which_summary=args.summary,
                                filename=args.summary_filename)
+    elif args.yaml_template:
+        return yamlwriter.create(
+            model,
+            args.dataset,
+            args.cnn,
+            filename='template.yaml',
+            qat_policy=qat_policy,
+        )
 
     activations_collectors = create_activation_stats_collectors(model, *args.activation_stats)
 
@@ -994,7 +1003,7 @@ def _validate(data_loader, model, criterion, loggers, args, epoch=-1, tflogger=N
             if regression:
                 np.savetxt(f, t.cpu().numpy(), delimiter=",")
             else:
-                for _, i in enumerate(t):
+                for i in t:
                     f.write(f'{args.labels[i.int()]}\n')
 
     if args.csv_prefix is not None:
@@ -1501,6 +1510,8 @@ def evaluate_model(model, criterion, test_loader, loggers, activations_collector
 def summarize_model(model, dataset, which_summary, filename='model'):
     """summarize_model"""
     if which_summary.startswith('png'):
+        if which_summary == 'png_simplified':
+            ai8x.onnx_export_prep(model, simplify=True, remove_clamp=True)
         model_summaries.draw_img_classifier_to_file(model, filename + '.png', dataset,
                                                     which_summary == 'png_w_params')
     elif which_summary in ['onnx', 'onnx_simplified']:
@@ -1719,7 +1730,7 @@ def update_old_model_params(model_path, model_new):
                            map_location=lambda storage, loc: storage)
     # Fix up any instances of DataParallel
     old_dict = model_old['state_dict'].copy()
-    for _, k in enumerate(old_dict):
+    for k in old_dict:
         if k.startswith('module.'):
             model_old['state_dict'][k[7:]] = old_dict[k]
     for new_key, new_val in model_new.state_dict().items():

@@ -215,6 +215,15 @@ class ScalerONNX(nn.Module):
         return x*s
 
 
+class ID3(nn.Module):
+    """
+    ID forward function with 3 arguments
+    """
+    def forward(self, x, _):  # pylint: disable=arguments-differ
+        """Forward prop"""
+        return x
+
+
 class RoundQat(nn.Module):
     """
     Round function for AvgPool in QAT mode
@@ -480,26 +489,36 @@ class QuantizationAwareModule(nn.Module):
         self.output_shift = nn.Parameter(torch.Tensor([0.]), requires_grad=False)
         self.init_module(weight_bits, bias_bits, quantize_activation, shift_quantile)
 
-    def init_module(self, weight_bits, bias_bits, quantize_activation, shift_quantile):
+    def init_module(
+            self,
+            weight_bits,
+            bias_bits,
+            quantize_activation,
+            shift_quantile,
+            export=False,
+    ):
         """Initialize model parameters"""
         if weight_bits is None and bias_bits is None and not quantize_activation:
-            self.weight_bits = nn.Parameter(torch.Tensor([0]), requires_grad=False)
-            self.bias_bits = nn.Parameter(torch.Tensor([0]), requires_grad=False)
-            self.quantize_activation = nn.Parameter(torch.Tensor([False]), requires_grad=False)
-            self.adjust_output_shift = nn.Parameter(torch.Tensor([False]), requires_grad=False)
+            if not export:
+                self.weight_bits = nn.Parameter(torch.Tensor([0]), requires_grad=False)
+                self.bias_bits = nn.Parameter(torch.Tensor([0]), requires_grad=False)
+                self.quantize_activation = nn.Parameter(torch.Tensor([False]), requires_grad=False)
+                self.adjust_output_shift = nn.Parameter(torch.Tensor([False]), requires_grad=False)
         elif weight_bits in [1, 2, 4, 8] and bias_bits in [1, 2, 4, 8] and quantize_activation:
             self.weight_bits = nn.Parameter(torch.Tensor([weight_bits]), requires_grad=False)
-            self.bias_bits = nn.Parameter(torch.Tensor([bias_bits]), requires_grad=False)
-            self.quantize_activation = nn.Parameter(torch.Tensor([True]), requires_grad=False)
-            self.adjust_output_shift = nn.Parameter(torch.Tensor([not dev.simulate]),
-                                                    requires_grad=False)
+            if not export:
+                self.bias_bits = nn.Parameter(torch.Tensor([bias_bits]), requires_grad=False)
+                self.quantize_activation = nn.Parameter(torch.Tensor([True]), requires_grad=False)
+                self.adjust_output_shift = nn.Parameter(torch.Tensor([not dev.simulate]),
+                                                        requires_grad=False)
         else:
             assert False, f'Undefined mode with weight_bits: {weight_bits}, ' \
                           f'bias_bits: {bias_bits}, ' \
                           f'quantize_activation: {quantize_activation}'
 
-        self.shift_quantile = nn.Parameter(torch.Tensor([shift_quantile]), requires_grad=False)
-        self.set_functions()
+        if not export:
+            self.shift_quantile = nn.Parameter(torch.Tensor([shift_quantile]), requires_grad=False)
+            self.set_functions()
 
     def set_functions(self):
         """Set functions to be used wrt the model parameters"""
@@ -625,6 +644,7 @@ class Conv2d(QuantizationAwareModule):
                     and (dev.device != 84 or pool_stride[0] <= 4 or pooling == 'Max')
                 assert 0 < pool_stride[1] <= 16 \
                     and (dev.device != 84 or pool_stride[1] <= 4 or pooling == 'Max')
+                assert pool_stride[0] == pool_stride[1]
             else:
                 raise ValueError('pool_stride must be int or tuple')
 
@@ -1519,7 +1539,7 @@ class QuantizeONNX(nn.Module):
         return x.mul(factor).round().div(factor)
 
 
-def initiate_qat(m, qat_policy):
+def initiate_qat(m, qat_policy, export=False):
     """
     Modify model `m` to start quantization aware training.
     """
@@ -1530,19 +1550,19 @@ def initiate_qat(m, qat_policy):
                 if 'shift_quantile' in qat_policy:
                     target_attr.init_module(qat_policy['weight_bits'],
                                             qat_policy['weight_bits'],
-                                            True, qat_policy['shift_quantile'])
+                                            True, qat_policy['shift_quantile'], export)
                 else:
                     target_attr.init_module(qat_policy['weight_bits'],
-                                            qat_policy['weight_bits'], True, 1.0)
+                                            qat_policy['weight_bits'], True, 1.0, export)
                 if 'overrides' in qat_policy:
                     if attr_str in qat_policy['overrides']:
                         weight_field = qat_policy['overrides'][attr_str]['weight_bits']
                         if 'shift_quantile' in qat_policy:
                             target_attr.init_module(weight_field, weight_field,
-                                                    True, qat_policy['shift_quantile'])
+                                                    True, qat_policy['shift_quantile'], export)
                         else:
                             target_attr.init_module(weight_field,
-                                                    weight_field, True, 1.0)
+                                                    weight_field, True, 1.0, export)
 
                 setattr(m, attr_str, target_attr)
 
@@ -1602,7 +1622,7 @@ def fuse_bn_layers(m):
     m.apply(_fuse_bn_layers)
 
 
-def onnx_export_prep(m, simplify=False):
+def onnx_export_prep(m, simplify=False, remove_clamp=False):
     """
     Prepare model `m` for ONNX export. When `simplify` is True, remove several
     quantization related operators from the model graph.
@@ -1629,8 +1649,14 @@ def onnx_export_prep(m, simplify=False):
                                           AvgPoolFloor, Floor, FloorQat, RoundQat)):
                 setattr(m, attr_str, Empty())
             elif isinstance(target_attr, OutputShift):
-                setattr(m, attr_str, OutputShiftONNX())
+                if remove_clamp:
+                    setattr(m, attr_str, ID3())
+                else:
+                    setattr(m, attr_str, OutputShiftONNX())
             elif isinstance(target_attr, Scaler):
-                setattr(m, attr_str, ScalerONNX())
+                if remove_clamp:
+                    setattr(m, attr_str, ID3())
+                else:
+                    setattr(m, attr_str, ScalerONNX())
 
     m.apply(_onnx_export_prep)
