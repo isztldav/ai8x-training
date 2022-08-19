@@ -10,8 +10,7 @@
 Generate YAML template from PyTorch model
 
 TODO: Implement smart processor and data memory allocator
-TODO: Implement write_gap, dilation, out_offset
-TODO: Combine convolution and eltwise passthrough layers
+TODO: Implement write_gap, dilation, out_offset, in_offset
 TODO: Insert passthrough layers
 TODO: Testing: passthrough, eltwise, depthwise
 """
@@ -255,6 +254,7 @@ def create(
                 main_op = op
             else:
                 this_layer['op'] = f'Unknown ({op})'
+            this_layer['main_op'] = main_op
 
             if main_op in ['Conv', 'ConvTranspose']:
                 if len(kernel_size) == 1:
@@ -379,7 +379,63 @@ def create(
         prev_op_name = name
         layers[name] = this_layer
 
-    # 4 - TODO: Merge element-wise and convolution layers
+    # 4 - Merge element-wise and convolution layers
+    prev_name: str = ''
+    pop_list: List[str] = []
+    for count, (name, ll) in enumerate(layers.items()):
+        if ll['main_op'] == 'Conv' and prev_name != '':
+            prev: Dict[str, Any] = layers[prev_name]
+            pool_count: int = 0
+            if 'max_pool' in prev:
+                pool_count += 1
+            if 'avg_pool' in prev:
+                pool_count += 1
+            if 'max_pool' in ll:
+                pool_count += 1
+            if 'avg_pool' in ll:
+                pool_count += 1
+            if 'in_sequences' not in ll and 'in_dim' not in ll and 'flatten' not in ll \
+               and prev['main_op'] == 'Passthrough' and prev['operands'] > 1 \
+               and pool_count <= 1:
+                # Combine both layers
+                print('Combining', prev_name, 'and', name)
+                pop_list.append(name)  # Mark second layer for deletion
+                # Copy over convolution operation
+                prev['op'] = ll['op']
+                prev['main_op'] = ll['main_op']
+                if 'output' in ll:
+                    prev['output'] = ll['output']
+                if 'quantization' in ll:
+                    prev['quantization'] = ll['quantization']
+                if 'output_width' in ll:
+                    prev['output_width'] = ll['output_width']
+                if 'kernel_size' in ll:
+                    prev['kernel_size'] = ll['kernel_size']
+                if 'pad' in ll:
+                    prev['pad'] = ll['pad']
+                if 'groups' in ll:
+                    prev['groups'] = ll['groups']
+                if 'activate' in ll:
+                    prev['activate'] = ll['activate']
+                if 'max_pool' in ll:
+                    prev['max_pool'] = ll['max_pool']
+                    prev['pool_first'] = 'false'
+                if 'avg_pool' in ll:
+                    prev['avg_pool'] = ll['avg_pool']
+                    prev['pool_first'] = 'false'
+                if 'pool_stride' in ll:
+                    prev['pool_stride'] = ll['pool_stride']
+                outputs[prev_name] = outputs[name]
+                inputs[name] = inputs[prev_name]
+
+        prev_name = name
+
+    # Delete the conv layers that were combined into the eltwise
+    for name in pop_list:
+        layers.pop(name)
+
+    for count, (name, ll) in enumerate(layers.items()):
+        print(count, name)
 
     # 5 - TODO: Insert passthrough layers
 
@@ -469,6 +525,8 @@ def create(
                 f.write(f"    flatten: {ll['flatten']}\n")
             if 'activate' in ll:
                 f.write(f"    activate: {ll['activate']}\n")
+            if 'pool_first' in ll:
+                f.write(f"    pool_first: {ll['pool_first']}\n")
             if 'max_pool' in ll:
                 f.write(f"    max_pool: {ll['max_pool']}\n")
             if 'avg_pool' in ll:
