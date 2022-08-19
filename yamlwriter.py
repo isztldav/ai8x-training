@@ -275,14 +275,9 @@ def create(
             input_hwc = hwc
         else:
             ins = chase_inputs(name, ins)
+            # Don't set in_sequences when using strictly sequential single inputs
             if len(ins) > 1 or (len(ins) > 0 and ins[0] != prev_op_name):
-                seq: str = '['
-                for i, ie in enumerate(ins):
-                    if i > 0:
-                        seq += ', '
-                    seq += ie
-                seq += ']'
-                this_layer['in_sequences'] = seq
+                this_layer['in_sequences'] = ins
 
             # Check whether inputs are flattened, and whether they were already flattened
             # previously
@@ -345,16 +340,10 @@ def create(
                 if ie in shapes:
                     processors += shapes[ie][0]
                     break
+        this_layer['proc_count'] = processors
 
         # Inner layers and more than 16 channels are always HWC
         hwc = hwc or (processors > 16) or (prev_op_name != '')
-
-        if processors == 0:
-            this_layer['processors'] = 0  # Unknown
-        else:
-            processors = allocate_processors(name, processors, hwc=hwc)
-            this_layer['processors'] = processors
-
         activate: str = name + '.activate'
         if activate in all_ops:
             this_layer['activate'] = all_ops[activate]['type']
@@ -379,12 +368,13 @@ def create(
         prev_op_name = name
         layers[name] = this_layer
 
-    # 4 - Merge element-wise and convolution layers
+    # 4 - Merge (fuse) element-wise and convolution layers
     prev_name: str = ''
-    pop_list: List[str] = []
+    pop_list: List[Tuple[str, str]] = []
     for count, (name, ll) in enumerate(layers.items()):
         if ll['main_op'] == 'Conv' and prev_name != '':
             prev: Dict[str, Any] = layers[prev_name]
+            # Only one pooling operation possible
             pool_count: int = 0
             if 'max_pool' in prev:
                 pool_count += 1
@@ -394,13 +384,22 @@ def create(
                 pool_count += 1
             if 'avg_pool' in ll:
                 pool_count += 1
-            if 'in_sequences' not in ll and 'in_dim' not in ll and 'flatten' not in ll \
+            # Check that no layer other than the conv layer uses the intermediate output of the
+            # element-wise layer as an input
+            can_fuse: bool = True
+            for (other_name, ol) in layers.items():
+                if other_name != name and other_name != prev_name and 'in_sequences' in ol:
+                    if prev_name in ol['in_sequences']:
+                        can_fuse = False
+                        break
+            if can_fuse \
+               and 'in_sequences' not in ll and 'in_dim' not in ll and 'flatten' not in ll \
                and prev['main_op'] == 'Passthrough' and prev['operands'] > 1 \
                and pool_count <= 1:
                 # Combine both layers
-                print('Combining', prev_name, 'and', name)
-                pop_list.append(name)  # Mark second layer for deletion
-                # Copy over convolution operation
+                prev['comment'] = f'{prev_name} fused with {name}'
+                pop_list.append((prev_name, name))  # Mark second layer for deletion
+                # Copy over convolution operation and keep the element-wise operation in place
                 prev['op'] = ll['op']
                 prev['main_op'] = ll['main_op']
                 if 'output' in ll:
@@ -430,19 +429,32 @@ def create(
 
         prev_name = name
 
-    # Delete the conv layers that were combined into the eltwise
-    for name in pop_list:
-        layers.pop(name)
+    # Delete the conv layers that were fused into the eltwise layer
+    for (prev_name, name) in pop_list:
+        # Change any dangling input sequences to the fused layer
+        for (other_name, ol) in layers.items():
+            if other_name != name and other_name != prev_name and 'in_sequences' in ol:
+                for i, e in enumerate(ol['in_sequences']):
+                    if e == name:
+                        ol['in_sequences'][i] = prev_name
 
-    for count, (name, ll) in enumerate(layers.items()):
-        print(count, name)
+        # Delete the conv portion
+        layers.pop(name)
 
     # 5 - TODO: Insert passthrough layers
 
-    # 6 - TODO: Assign output_offset
+    # 6 - TODO: Assign processors and output_offset
     out_offset = 0  # Start at 0 (default input offset)
     for (name, ll) in layers.items():
-        out_offset = allocate_offset(name, ll['processors'], out_offset)
+        processors = ll['proc_count']
+        hwc = ll['data_format'] if 'data_format' in ll else True
+        if processors == 0:
+            layers[name]['processors'] = 0  # Unknown
+        else:
+            processors = allocate_processors(name, processors, hwc=hwc)
+            layers[name]['processors'] = processors
+
+        out_offset = allocate_offset(name, processors, out_offset)
         layers[name]['out_offset'] = out_offset
 
     # 7 - Print
@@ -461,8 +473,12 @@ def create(
 
         prev_name = ''
         for count, (name, ll) in enumerate(layers.items()):
-            f.write(f'  # Layer {count}\n'
-                    f'  - name: {name}\n')
+            f.write('\n'
+                    f'  # Layer {count}\n'
+                    f'  - name: {name}')
+            if 'comment' in ll:
+                f.write(f"  # {ll['comment']}")
+            f.write('\n')
 
             hwc = ll['data_format'] if 'data_format' in ll else True
 
@@ -493,7 +509,13 @@ def create(
             if 'data_format' in ll:
                 f.write(f'    data_format: {"HWC" if hwc else "CHW"}\n')
             if 'in_sequences' in ll:
-                f.write(f"    in_sequences: {ll['in_sequences']}\n")
+                f.write('    in_sequences: [')
+                ins = ll['in_sequences']
+                for i, ie in enumerate(ins):
+                    if i > 0:
+                        f.write(', ')
+                    f.write(ie)
+                f.write(']\n')
             if 'in_dim' in ll:
                 f.write(f"    in_dim: {ll['in_dim']}\n")
             show_output = verbose
