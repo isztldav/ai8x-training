@@ -9,10 +9,9 @@
 """
 Generate YAML template from PyTorch model
 
-TODO: Implement smart processor and data memory allocator
-TODO: Implement write_gap, dilation, out_offset, in_offset
-TODO: Insert passthrough layers
-TODO: Testing: passthrough, eltwise, depthwise
+TODO: Implement smart processor and data memory allocator (out_offset, in_offset)
+TODO: Implement dilation
+TODO: Testing
 """
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -104,10 +103,7 @@ def create(
         if len(shape) > 1:
             shapes[i] = param['shape'][1:]  # Remove batch dimension
 
-    # print('SHAPES', shapes)
-
     all_ops = g.ops
-    # print(all_ops)
 
     def canonical_name(s: str) -> str:
         separator = s.rfind('.')
@@ -167,7 +163,6 @@ def create(
     def chase_inputs(layer: str, ins: List[str]) -> List[str]:
         ret: List[str] = []
 
-        # print('CHASE_INPUTS', layer, ins)
         for ie in ins:
             if ie == layer:
                 continue
@@ -233,9 +228,6 @@ def create(
         if op_name in all_ops:
             op = all_ops[op_name]['type']
 
-            # ('dilations', [1, 1])
-            # ('strides', [1, 1])
-
             main_op = 'Passthrough'
             if op in ('Add', 'Sub', 'Xor'):
                 operands = len(ins)
@@ -277,6 +269,7 @@ def create(
             ins = chase_inputs(name, ins)
             # Don't set in_sequences when using strictly sequential single inputs
             if len(ins) > 1 or (len(ins) > 0 and ins[0] != prev_op_name):
+                ins.reverse()  # Reverse the list since PyTorch does it backwards
                 this_layer['in_sequences'] = ins
 
             # Check whether inputs are flattened, and whether they were already flattened
@@ -441,7 +434,73 @@ def create(
         # Delete the conv portion
         layers.pop(name)
 
-    # 5 - TODO: Insert passthrough layers
+    # 5 - Insert passthrough layers for write_gap
+    write_gap_list: List[Tuple[str, int]] = []
+    insert_list: List[Tuple[str, int]] = []
+    source_list: List[Tuple[str, str]] = []
+    for (name, ll) in layers.items():
+        if 'operands' not in ll:
+            continue
+        operands = ll['operands']
+        # For each input, check whether anybody else is using the input. If yes, insert a dummy
+        # layer that creates a write_gap version of the data. If no, add the write_gap to the
+        # producer.
+        for source in ll['in_sequences']:
+            must_insert: bool = False
+            prev_name = ''
+            for (other_name, ol) in layers.items():
+                if other_name != name and other_name != source:
+                    if 'in_sequences' in ol:
+                        for e in ol['in_sequences']:
+                            if e == source:
+                                must_insert = True
+                    elif prev_name == source:
+                        must_insert = True
+                        # Break the sequence
+                        ol['in_sequences'] = [source]
+                prev_name = other_name
+            if not must_insert:
+                # The source is used only by the element-wise layer, so we can insert the write gap
+                # directly
+                write_gap_list.append((source, operands))
+            else:
+                insert_list.append((source, operands))
+                # Replace source with source_gap in layers[name]['in_sequences']
+                source_list.append((name, source))
+                new_name = source + '_gap'
+                # ...and insert shaope information (input and output are both the same as the
+                # original layer's output)
+                inputs[new_name] = [source + '_data']
+                outputs[new_name] = [name + '_data']
+                for ie in outputs[source]:
+                    if ie in shapes:
+                        shapes[name + '_data'] = shapes[ie]
+                        shapes[source + '_data'] = shapes[ie]
+
+    # Insert simple write gaps
+    for (name, gap) in write_gap_list:
+        layers[name]['write_gap'] = gap - 1
+    # Break sequence
+    for (name, source) in source_list:
+        seq = layers[name]['in_sequences']
+        for i, s in enumerate(seq):
+            if s == source:
+                seq[i] = source + '_gap'
+    # Insert additional layers
+    new_layer: Dict[str, Any] = {}
+    for (name, gap) in insert_list:
+        new_name = name + '_gap'
+        new_layer['name'] = new_name
+        new_layer['proc_count'] = layers[name]['proc_count']  # Same processor count as original
+        new_layer['op'] = 'Passthrough'
+        new_layer['name'] = name + '_gap'
+        new_layer['write_gap'] = gap - 1
+
+        # Insert into dict via list
+        insert_pos: int = list(layers.keys()).index(name) + 1
+        layers_list: List[Any] = list(layers.items())
+        layers_list.insert(insert_pos, (new_name, new_layer))
+        layers = dict(layers_list)
 
     # 6 - TODO: Assign processors and output_offset
     out_offset = 0  # Start at 0 (default input offset)
@@ -555,6 +614,8 @@ def create(
                 f.write(f"    avg_pool: {ll['avg_pool']}\n")
             if 'pool_stride' in ll:
                 f.write(f"    pool_stride: {ll['pool_stride']}\n")
+            if 'write_gap' in ll:
+                f.write(f"    write_gap: {ll['write_gap']}\n")
 
             # Show output dimensions for all output layers
             if name == final_layer or show_output:
