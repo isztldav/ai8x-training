@@ -9,16 +9,18 @@
 """
 Generate YAML template from PyTorch model
 
-TODO: Smart processor and data memory allocator
-TODO: write_gap, in_dim, out_offset
+TODO: Implement smart processor and data memory allocator
+TODO: Implement write_gap, dilation, out_offset
 TODO: Combine convolution and eltwise passthrough layers
-TODO: Test passthrough, eltwise, Abs
+TODO: Insert passthrough layers
+TODO: Testing: passthrough, eltwise, depthwise
 """
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import distiller
 
 import ai8x
+import devices
 
 
 def allocate_processors(
@@ -108,16 +110,6 @@ def create(
     all_ops = g.ops
     # print(all_ops)
 
-    # Create the YAML header
-    print(
-        '---\n'
-        '\n'
-        f'arch: {arch}\n'
-        f'dataset: {dataset}\n'
-        '\n'
-        'layers:'
-    )
-
     def canonical_name(s: str) -> str:
         separator = s.rfind('.')
         if separator > 0:
@@ -127,7 +119,7 @@ def create(
             return s[:separator]
         return s
 
-    # Pass 1 - Associate inputs and outputs
+    # 1 - Associate inputs and outputs
     input_layer: Dict[str, str] = {}
     output_layer: Dict[str, str] = {}
     final_layer: str = ''
@@ -148,7 +140,7 @@ def create(
 
         final_layer = name
 
-    # Pass 2 - Collect inputs and outputs
+    # 2 - Collect inputs and outputs
     inputs: Dict[str, List[str]] = {}
     outputs: Dict[str, List[str]] = {}
 
@@ -170,14 +162,7 @@ def create(
             if ie != '' and (ie not in input_layer or input_layer[ie] != name):
                 outputs[name].append(ie)
 
-    # print('INPUTS', inputs)
-    # print('OUTPUTS', outputs)
-    # print('INPUT_LAYER', input_layer)
-    # print('OUTPUT_LAYER', output_layer)
-
-    # Pass 2 - Collect ops
-    layers: List[str] = []
-
+    # 3 - Collect ops
     prev_op_name: str = ''
 
     def chase_inputs(layer: str, ins: List[str]) -> List[str]:
@@ -203,74 +188,107 @@ def create(
             if ie not in filtered:
                 filtered.append(ie)
 
-        # print(ins, '->', ret, '->', filtered)
         return filtered
 
-    out_offset = 0  # Start at 0 (default input offset)
+    layers: Dict[str, Dict[str, Any]] = {}
+    input_hwc: bool = False
 
     for e in all_ops:
         name = canonical_name(e)
-        if name in layers:
-            continue
-        layers.append(name)
         if name.startswith('top_level_op'):
             continue
+        if name in layers:
+            continue
+        this_layer: Dict[str, Any] = {}
 
-        print(f'  - name: {name}')
+        this_layer['name'] = name
         ins = inputs[name]
 
-        # Find number of processors needed
-        processors: int = 0
-        for ie in inputs[name]:
-            if ie in shapes:
-                processors += shapes[ie][0]
+        # Mark output layers (the final layer is always an output layer)
+        if name != final_layer and any(x not in input_layer for x in outputs[name]):
+            this_layer['output'] = 'true'
 
-        # Inner layers and more than 16 channels are always HWC
-        hwc = hwc or (processors > 16) or (prev_op_name != '')
+        try:
+            quantization = int(model.get_parameter(name + '.weight_bits'))
+            if quantization == 0:
+                quantization = 8
+        except AttributeError:
+            quantization = 8
+        if quantization != 8:
+            assert quantization in [1, 2, 4], f'{name}: quantization={quantization}'
+            this_layer['quantization'] = quantization
 
-        # Check input sequences and dimensions
-        warn_dim = False
-        print_dim = verbose or prev_op_name == ''
-        if print_dim:
-            print('    # input shape: ', end='')
-        i = 0
-        max_pixels = MAX_PIXELS if hwc else 4 * MAX_PIXELS
-        for ie in inputs[name]:
-            if ie in shapes:
-                if i > 0 and print_dim:
-                    print(', ', end='')
-                if print_dim:
-                    print(shapes[ie], end='')
-                pixels = 1
-                for x in range(1, len(shapes[ie])):
-                    pixels *= shapes[ie][x]
-                if pixels > max_pixels:
-                    warn_dim = True
-                i += 1
-        if print_dim:
-            print('')
-        if warn_dim:
-            print(f'    # dimensions ({pixels} pixels) may require streaming or folding')
+        clamp: str = name + '.clamp'
+        if clamp in all_ops and 'value' in all_ops[clamp]['attrs']:
+            clamp_val = int(all_ops[clamp]['attrs']['value'])
+            assert clamp_val in [-1, -32768]
+            if clamp_val == -32768:
+                this_layer['output_width'] = 32
 
+        this_layer['op'] = 'Passthrough'
+        operands: int = 1
+
+        op_name: str = name + '.op'
+        if op_name not in all_ops:
+            op_name = name
+        if op_name in all_ops:
+            op = all_ops[op_name]['type']
+
+            # ('dilations', [1, 1])
+            # ('strides', [1, 1])
+
+            main_op = 'Passthrough'
+            if op in ('Add', 'Sub', 'Xor'):
+                operands = len(ins)
+                this_layer['eltwise'] = op
+                this_layer['operands'] = operands
+            elif op in ('Gemm', 'Transpose'):
+                this_layer['op'] = 'Linear'
+                main_op = 'Linear'
+            elif op == 'Conv':
+                kernel_size = all_ops[op_name]['attrs']['kernel_shape']
+                this_layer['op'] = f'Conv{len(kernel_size)}d'
+                main_op = op
+            elif op == 'ConvTranspose':
+                kernel_size = all_ops[op_name]['attrs']['kernel_shape']
+                this_layer['op'] = f'ConvTranspose{len(kernel_size)}d'
+                main_op = op
+            else:
+                this_layer['op'] = f'Unknown ({op})'
+
+            if main_op in ['Conv', 'ConvTranspose']:
+                if len(kernel_size) == 1:
+                    this_layer['kernel_size'] = str(kernel_size[0])
+                else:
+                    this_layer['kernel_size'] = f'{kernel_size[0]}x{kernel_size[1]}'
+                pad = all_ops[op_name]['attrs']['pads']
+                this_layer['pad'] = pad[0]
+                groups = all_ops[op_name]['attrs']['group']
+                if groups != 1:
+                    this_layer['groups'] = groups
+
+        flatten: bool = False
+        pre_flattened_channel_count: int = 0
         if prev_op_name == '':
             # Show input dimensions and data format for input layers
-            print(f'    data_format: {"HWC" if hwc else "CHW"}')
-            flatten = False
+            this_layer['data_format'] = hwc
+            input_hwc = hwc
         else:
             ins = chase_inputs(name, ins)
             if len(ins) > 1 or (len(ins) > 0 and ins[0] != prev_op_name):
-                print('    in_sequences: [', end='')
+                seq: str = '['
                 for i, ie in enumerate(ins):
                     if i > 0:
-                        print(', ', end='')
-                    print(ie, end='')
-                print(']')
+                        seq += ', '
+                    seq += ie
+                seq += ']'
+                this_layer['in_sequences'] = seq
 
             # Check whether inputs are flattened, and whether they were already flattened
             # previously
             flatten = True
-            in_dim = None
-            prev_dim = None
+            in_dim: Optional[Union[Tuple[int, ...], List[int]]] = None
+            prev_dim: Optional[Union[Tuple[int, ...], List[int]]] = None
             for ie in inputs[name]:
                 if ie in shapes:
                     mult: int = 1
@@ -288,6 +306,7 @@ def create(
                                 mult *= x
                             if shapes[je][0] != mult:
                                 prev_flatten = False
+                            pre_flattened_channel_count += shapes[je][0]
             flatten = flatten and not prev_flatten
 
             # Check whether dimensions need to change
@@ -305,100 +324,42 @@ def create(
                 if in_dim is not None and in_dim != prev_dim:
                     if len(in_dim) > 0:
                         in_dim = list(in_dim)
-                    print(f'    in_dim: {in_dim}')
-
-        # Mark output layers (the final layer is always an output layer)
-        show_output = verbose
-        if name != final_layer and any(x not in input_layer for x in outputs[name]):
-            print('    output: true')
-            show_output = True
-        # Show output dimensions for all output layers
-        if name == final_layer or show_output:
-            print('    # output shape: ', end='')
-            i = 0
-            for ie in outputs[name]:
-                if ie in shapes:
-                    if i > 0:
-                        print(', ', end='')
-                    print(shapes[ie], end='')
-                    i += 1
-            print('')
-
-        if processors == 0:
-            print('    processors: unknown')
-        else:
-            processors = allocate_processors(name, processors, hwc=hwc)
-            print(f'    processors: 0x{processors:016x}')
-
-        out_offset = allocate_offset(name, processors, out_offset)
-        print(f'    out_offset: 0x{out_offset:04x}')
-
-        try:
-            quantization = int(model.get_parameter(name + '.weight_bits'))
-        except ValueError:
-            quantization = 8
-        if quantization != 8:
-            assert quantization in [1, 2, 4]
-            print(f'    quantization: {quantization}')
-
-        clamp: str = name + '.clamp'
-        if clamp in all_ops and 'value' in all_ops[clamp]['attrs']:
-            clamp_val = int(all_ops[clamp]['attrs']['value'])
-            assert clamp_val in [-1, -32768]
-            if clamp_val == -32768:
-                print('    output_width: 32')
-
-        op_name: str = name + '.op'
-        if op_name not in all_ops:
-            op_name = name
-        if op_name in all_ops:
-            op = all_ops[op_name]['type']
-
-            # ('dilations', [1, 1])
-            # ('strides', [1, 1])
-
-            main_op = 'Passthrough'
-            eltwise: int = 1
-            if op in ('Add', 'Sub', 'Xor'):
-                eltwise = len(ins)
-                print('    op: Passthrough')
-                print(f'    eltwise: {op}')
-                print(f'    operands: {eltwise}')
-            elif op in ('Gemm', 'Transpose'):
-                print('    op: Linear')
-                main_op = 'Linear'
-            elif op == 'Conv':
-                kernel_size = all_ops[op_name]['attrs']['kernel_shape']
-                print(f'    op: Conv{len(kernel_size)}d')
-                main_op = op
-            elif op == 'ConvTranspose':
-                kernel_size = all_ops[op_name]['attrs']['kernel_shape']
-                print(f'    op: ConvTranspose{len(kernel_size)}d')
-                main_op = op
-            else:
-                print(f'    op: Unknown ({op})')
-
-            if main_op in ['Conv', 'ConvTranspose']:
-                if len(kernel_size) == 1:
-                    print(f'    kernel_size: {kernel_size[0]}')
-                else:
-                    print(f'    kernel_size: {kernel_size[0]}x{kernel_size[1]}')
-                pad = all_ops[op_name]['attrs']['pads']
-                print('    pad:', pad[0])
-                groups = all_ops[op_name]['attrs']['group']
-                if groups != 1:
-                    print('    groups:', groups)
-        else:
-            print('    op: Passthrough')
+                    this_layer['in_dim'] = in_dim
 
         if flatten:
-            print('    flatten: true')
+            this_layer['flatten'] = 'true'
+
+        # Find number of processors needed
+        processors: int = 0
+        if operands == 1:
+            # Concatenate data
+            if not flatten:
+                for ie in inputs[name]:
+                    if ie in shapes:
+                        processors += shapes[ie][0]
+            else:
+                processors = pre_flattened_channel_count
+        else:
+            # Element-wise - interleaved data
+            for ie in inputs[name]:
+                if ie in shapes:
+                    processors += shapes[ie][0]
+                    break
+
+        # Inner layers and more than 16 channels are always HWC
+        hwc = hwc or (processors > 16) or (prev_op_name != '')
+
+        if processors == 0:
+            this_layer['processors'] = 0  # Unknown
+        else:
+            processors = allocate_processors(name, processors, hwc=hwc)
+            this_layer['processors'] = processors
 
         activate: str = name + '.activate'
         if activate in all_ops:
-            print('    activate:', all_ops[activate]['type'])
+            this_layer['activate'] = all_ops[activate]['type']
         elif main_op in ['Conv', 'Linear']:
-            print('    activate: None')
+            this_layer['activate'] = 'None'
 
         pool: str = name + '.pool_Pad_1'
         if pool not in all_ops:
@@ -410,9 +371,121 @@ def create(
             if len(shape) == 1 or shape[0] == shape[1]:
                 shape = shape[0]
             if all_ops[pool]['type'] == 'MaxPool':
-                print('    max_pool:', shape)
+                this_layer['max_pool'] = shape
             else:
-                print('    avg_pool:', shape)
-            print('    pool_stride:', all_ops[pool]['attrs']['strides'][0])
+                this_layer['avg_pool'] = shape
+            this_layer['pool_stride'] = all_ops[pool]['attrs']['strides'][0]
 
         prev_op_name = name
+        layers[name] = this_layer
+
+    # 4 - TODO: Merge element-wise and convolution layers
+
+    # 5 - TODO: Insert passthrough layers
+
+    # 6 - TODO: Assign output_offset
+    out_offset = 0  # Start at 0 (default input offset)
+    for (name, ll) in layers.items():
+        out_offset = allocate_offset(name, ll['processors'], out_offset)
+        layers[name]['out_offset'] = out_offset
+
+    # 7 - Print
+    with open(filename, mode='w', encoding='utf-8') as f:
+        f.write(
+            '---\n'
+            '# YAML template -- requires manual editing, particularly with regard to out_offset '
+            'and processors\n'
+            f'# Generated for {devices.partnum(ai8x.dev.device)} with input format '
+            f'{"HWC" if input_hwc else "CHW"}\n\n'
+            f'arch: {arch}\n'
+            f'dataset: {dataset}\n'
+            '\n'
+            'layers:\n'
+        )
+
+        prev_name = ''
+        for count, (name, ll) in enumerate(layers.items()):
+            f.write(f'  # Layer {count}\n'
+                    f'  - name: {name}\n')
+
+            hwc = ll['data_format'] if 'data_format' in ll else True
+
+            # Check input sequences and dimensions
+            warn_dim = False
+            print_dim = verbose or prev_name == ''
+            if print_dim:
+                f.write('    # input shape: ')
+            i = 0
+            max_pixels = MAX_PIXELS if hwc else 4 * MAX_PIXELS
+            for ie in inputs[name]:
+                if ie in shapes:
+                    if i > 0 and print_dim:
+                        f.write(', ')
+                    if print_dim:
+                        f.write(str(shapes[ie]))
+                    pixels = 1
+                    for x in range(1, len(shapes[ie])):
+                        pixels *= shapes[ie][x]
+                    if pixels > max_pixels:
+                        warn_dim = True
+                    i += 1
+            if print_dim:
+                f.write('\n')
+            if warn_dim:
+                f.write(f'    # dimensions ({pixels} pixels) may require streaming or folding\n')
+
+            if 'data_format' in ll:
+                f.write(f'    data_format: {"HWC" if hwc else "CHW"}\n')
+            if 'in_sequences' in ll:
+                f.write(f"    in_sequences: {ll['in_sequences']}\n")
+            if 'in_dim' in ll:
+                f.write(f"    in_dim: {ll['in_dim']}\n")
+            show_output = verbose
+            if 'output' in ll:
+                f.write(f"    output: {ll['output']}\n")
+                show_output = True
+            processors = ll['processors']
+            if processors == 0:
+                f.write('    processors: unknown\n')
+            else:
+                f.write(f'    processors: 0x{processors:016x}\n')
+            f.write(f"    out_offset: 0x{ll['out_offset']:04x}\n")
+            if 'quantization' in ll:
+                f.write(f"    quantization: {ll['quantization']}\n")
+            if 'output_width' in ll:
+                f.write(f"    output_width: {ll['output_width']}\n")
+            f.write(f"    op: {ll['op']}\n")
+            if 'eltwise' in ll:
+                f.write(f"    eltwise: {ll['eltwise']}\n")
+            if 'operands' in ll:
+                f.write(f"    operands: {ll['operands']}\n")
+            if 'kernel_size' in ll:
+                f.write(f"    kernel_size: {ll['kernel_size']}\n")
+            if 'pad' in ll:
+                f.write(f"    pad: {ll['pad']}\n")
+            if 'groups' in ll:
+                f.write(f"    groups: {ll['groups']}\n")
+            if 'flatten' in ll:
+                f.write(f"    flatten: {ll['flatten']}\n")
+            if 'activate' in ll:
+                f.write(f"    activate: {ll['activate']}\n")
+            if 'max_pool' in ll:
+                f.write(f"    max_pool: {ll['max_pool']}\n")
+            if 'avg_pool' in ll:
+                f.write(f"    avg_pool: {ll['avg_pool']}\n")
+            if 'pool_stride' in ll:
+                f.write(f"    pool_stride: {ll['pool_stride']}\n")
+
+            # Show output dimensions for all output layers
+            if name == final_layer or show_output:
+                f.write('    # output shape: ')
+                i = 0
+                for ie in outputs[name]:
+                    if ie in shapes:
+                        if i > 0:
+                            f.write(', ')
+                        f.write(str(shapes[ie]))
+                        i += 1
+                f.write('\n')
+
+            prev_name = name
