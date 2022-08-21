@@ -11,6 +11,8 @@ Generate YAML template from PyTorch model
 
 TODO: Implement smart processor and data memory allocator (out_offset, in_offset)
 TODO: Implement dilation
+TODO: Remove layer fusing for certain cases where hardware is not compatible
+      (see train_cifar100_qat8_effnet2.sh)
 TODO: Testing
 """
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -109,7 +111,11 @@ def create(
     def canonical_name(s: str) -> str:
         separator = s.rfind('.')
         if separator > 0:
-            return s[:separator]
+            suffix = s[separator + 1:]
+            if suffix in ('activate', 'calc_out_scale', 'calc_out_shift',
+                          'clamp', 'op', 'pool', 'scale') \
+               or suffix.startswith('clamp_') or suffix.startswith('pool_'):
+                return s[:separator]
         separator = s.rfind('_Div_1')
         if separator > 0:
             return s[:separator]
@@ -221,6 +227,7 @@ def create(
                 this_layer['output_width'] = 32
 
         this_layer['op'] = 'Passthrough'
+        main_op = 'Passthrough'
         operands: int = 1
 
         op_name: str = name + '.op'
@@ -229,7 +236,6 @@ def create(
         if op_name in all_ops:
             op = all_ops[op_name]['type']
 
-            main_op = 'Passthrough'
             if op in ('Add', 'Sub', 'Xor'):
                 operands = len(ins)
                 this_layer['eltwise'] = op
@@ -247,7 +253,6 @@ def create(
                 main_op = op
             else:
                 this_layer['op'] = f'Unknown ({op})'
-            this_layer['main_op'] = main_op
 
             if main_op in ['Conv', 'ConvTranspose']:
                 if len(kernel_size) == 1:
@@ -259,6 +264,7 @@ def create(
                 groups = all_ops[op_name]['attrs']['group']
                 if groups != 1:
                     this_layer['groups'] = groups
+        this_layer['main_op'] = main_op
 
         flatten: bool = False
         pre_flattened_channel_count: int = 0
@@ -297,20 +303,34 @@ def create(
 
             # Check whether dimensions need to change
             if not flatten:
+                mult = 1
                 for n in inputs[name]:
                     if n in shapes:
-                        in_dim = shapes[n][1:]
+                        for x in shapes[n]:
+                            mult *= x
+                        if len(shapes[n]) > 1 and mult != shapes[n][0]:
+                            in_dim = shapes[n][1:]
+                        else:
+                            in_dim = shapes[n]
                         break
+                mult = 1
                 for n in ins:
                     if n in outputs:
                         for o in outputs[n]:
                             if o in shapes:
-                                prev_dim = shapes[o][1:]
+                                for x in shapes[o]:
+                                    mult *= x
+                                if len(shapes[o]) > 1 and mult != shapes[o][0]:
+                                    prev_dim = shapes[o][1:]
+                                else:
+                                    prev_dim = shapes[o]
                                 break
-                if in_dim is not None and in_dim != prev_dim:
-                    if len(in_dim) > 0:
-                        in_dim = list(in_dim)
-                    this_layer['in_dim'] = in_dim
+                if in_dim is not None and prev_dim is not None:
+                    if in_dim != prev_dim \
+                       and (in_dim[0] != prev_dim[0] or len(in_dim) > 1 or mult != in_dim[0]):
+                        if len(in_dim) > 0:
+                            in_dim = list(in_dim)
+                        this_layer['in_dim'] = in_dim
 
         if flatten:
             this_layer['flatten'] = 'true'
@@ -366,6 +386,8 @@ def create(
         layers[name] = this_layer
 
     # 4 - Merge (fuse) element-wise and convolution layers
+    # TODO: There's an exception where this doesn't work in hardware.
+    # See train_cifar100_qat8_effnet2.sh
     prev_name: str = ''
     pop_list: List[Tuple[str, str]] = []
     for count, (name, ll) in enumerate(layers.items()):
