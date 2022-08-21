@@ -38,7 +38,13 @@ def allocate_processors(
         if count > 64:  # Multi-pass processor count
             divider = (count + 63) // 64
             count = (count + divider - 1) // divider  # Rounded up
+            remainder = count % 4
+            if remainder != 0:
+                remainder = 4 - remainder
+            count += remainder  # To next multiple of 4
         assert count <= 64
+
+        # Pick "count" processors starting from 0
         return (1 << count) - 1
 
     assert count <= 16
@@ -416,7 +422,8 @@ def create(
                         break
             if 'in_sequences' in ll or 'in_dim' in ll or 'flatten' in ll:
                 can_fuse = False
-            if prev['main_op'] != 'Passthrough' or prev['operands'] == 1 or pool_count > 1:
+            if prev['main_op'] != 'Passthrough' or 'operands' not in prev \
+               or prev['operands'] == 1 or pool_count > 1:
                 can_fuse = False
             if can_fuse:
                 # Combine both layers
