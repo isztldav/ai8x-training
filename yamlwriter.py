@@ -15,7 +15,7 @@ TODO: Remove layer fusing for certain cases where hardware is not compatible
       (see train_cifar100_qat8_effnet2.sh)
 TODO: Testing
 """
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, OrderedDict, Tuple, Union
 
 import distiller
 
@@ -115,9 +115,12 @@ def create(
         if len(shape) > 1:
             shapes[i] = param['shape'][1:]  # Remove batch dimension
 
-    all_ops = g.ops
+    all_ops: OrderedDict[str, Dict[str, Any]] = g.ops
 
     def canonical_name(s: str) -> str:
+        """
+        Return the canonical name for this layer
+        """
         separator = s.rfind('.')
         if separator > 0:
             suffix = s[separator + 1:]
@@ -130,24 +133,60 @@ def create(
             return s[:separator]
         return s
 
+    def ignore_layer(name: str, op: str) -> bool:
+        """
+        Remove these layers from the graph
+        """
+        return op in ('Cast', 'Concat', 'Constant', 'Gather', 'Max', 'Min', 'Mul', 'Pow',
+                      'Reshape', 'Transpose', 'Shape', 'Squeeze', 'Unsqueeze') \
+            or name.startswith('top_level_op')
+
+    # 0 - Remove layers
+    ignore_layers: List[str] = []
+    for e in all_ops:
+        if ignore_layer(e, all_ops[e]['type']):
+            ignore_layers.append(e)
+
+    # Fix up inputs after removing a layer
+    for check_layer in ignore_layers:
+        ignore_layer_inputs = all_ops[check_layer]['inputs']
+        ignore_layer_outputs = all_ops[check_layer]['outputs']
+        # Look for check_layer's outputs in the inputs of all other layers and replace
+        for n in all_ops:
+            if ignore_layer(n, all_ops[n]['type']):
+                continue
+            # print('layer', n, 'type is', all_ops[n]['type'])
+            if check_layer != n:
+                for remove_output in ignore_layer_outputs:
+                    new_inputs: List[str] = []
+                    # print('checking layer', n, 'inputs:', all_ops[n]['inputs'])
+                    for check_input in all_ops[n]['inputs']:
+                        if remove_output == check_input:
+                            # print('Found output', remove_output, 'from layer', check_layer,
+                            #       'as input in another layer', n,
+                            #       'replacing with e\'s inputs:', ignore_layer_inputs)
+                            new_inputs += ignore_layer_inputs
+                        else:
+                            # print('checking', check_input, 'is not replaced')
+                            new_inputs.append(check_input)
+                    if new_inputs != all_ops[n]['inputs']:
+                        # print('replacing inputs for layer', n, all_ops[n]['inputs'], '->',
+                        #       new_inputs)
+                        all_ops[n]['inputs'] = new_inputs
+
     # 1 - Associate inputs and outputs
     input_layer: Dict[str, str] = {}
     output_layer: Dict[str, str] = {}
     final_layer: str = ''
 
-    for e in all_ops:
-        name = canonical_name(e)
-
-        for ie in all_ops[e]['inputs']:
+    for name in all_ops:
+        for ie in all_ops[name]['inputs']:
             if ie != '':
                 input_layer[ie] = name
 
-        for ie in all_ops[e]['outputs']:
+        for ie in all_ops[name]['outputs']:
             if ie != '':
                 output_layer[ie] = name
-
-        if name.startswith('top_level_op'):
-            continue
 
         final_layer = name
 
@@ -155,13 +194,14 @@ def create(
     inputs: Dict[str, List[str]] = {}
     outputs: Dict[str, List[str]] = {}
 
-    for e in all_ops:
-        name = canonical_name(e)
+    for name in all_ops:
+        if ignore_layer(name, all_ops[name]['type']):
+            continue
 
         # Get input names from first of the layer group
         if name not in inputs:
             inputs[name] = []
-        for ie in all_ops[e]['inputs']:
+        for ie in all_ops[name]['inputs']:
             if ie != '' and not ie.endswith('.op.bias') and not ie.endswith('.op.weight') \
                and not ie.endswith('.output_shift'):
                 if ie not in output_layer or output_layer[ie] != name:
@@ -169,27 +209,34 @@ def create(
 
         if name not in outputs:
             outputs[name] = []
-        for ie in all_ops[e]['outputs']:
+        for ie in all_ops[name]['outputs']:
             if ie != '' and (ie not in input_layer or input_layer[ie] != name):
                 outputs[name].append(ie)
 
     # 3 - Collect ops
     prev_op_name: str = ''
 
-    def chase_inputs(layer: str, ins: List[str]) -> List[str]:
+    def chase_inputs(
+            layer: str,
+            all_ops: OrderedDict[str, Dict[str, Any]],
+            ins: List[str],
+    ) -> List[str]:
         ret: List[str] = []
 
+        # print('chasing', ins)
         for ie in ins:
             if ie == layer:
                 continue
             n = ie
-            if n in output_layer and output_layer[n].startswith('top_level_op'):
+            # print('looking at', n)
+            if n in output_layer:
                 n = output_layer[n]
-            if n in output_layer and output_layer[n] != layer:
-                ret.append(output_layer[n])
+                # print('one down', n)
+                if n in output_layer and output_layer[n] != layer:
+                    ret.append(output_layer[n])
 
             if n in inputs and inputs[n]:
-                val: List[str] = chase_inputs(layer, inputs[n])
+                val: List[str] = chase_inputs(layer, all_ops, inputs[n])
                 if val:
                     ret += val
 
@@ -203,32 +250,25 @@ def create(
     layers: Dict[str, Dict[str, Any]] = {}
     input_hwc: bool = False
 
-    for e in all_ops:
-        name = canonical_name(e)
-        if name.startswith('top_level_op'):
+    for name in all_ops:
+        if ignore_layer(name, all_ops[name]['type']):
             continue
-        if name in layers:
-            continue
+        canonical = canonical_name(name)
+        # print('layer:', name, canonical)
         this_layer: Dict[str, Any] = {}
 
-        this_layer['name'] = name
+        this_layer['name'] = canonical
         ins = inputs[name]
+        if prev_op_name != '':
+            ins = chase_inputs(name, all_ops, ins)
 
         # Mark output layers (the final layer is always an output layer)
         if name != final_layer and any(x not in input_layer for x in outputs[name]):
+            # print(name, 'outputs:', outputs[name])
+            # print(name, 'input_layer', input_layer)
             this_layer['output'] = 'true'
 
-        try:
-            quantization = int(model.get_parameter(name + '.weight_bits'))
-            if quantization == 0:
-                quantization = 8
-        except AttributeError:
-            quantization = 8
-        if quantization != 8:
-            assert quantization in [1, 2, 4], f'{name}: quantization={quantization}'
-            this_layer['quantization'] = quantization
-
-        clamp: str = name + '.clamp'
+        clamp: str = canonical + '.clamp'
         if clamp in all_ops and 'value' in all_ops[clamp]['attrs']:
             clamp_val = int(all_ops[clamp]['attrs']['value'])
             assert clamp_val in [-1, -32768]
@@ -239,127 +279,121 @@ def create(
         main_op = 'Passthrough'
         operands: int = 1
 
-        op_name: str = name + '.op'
-        if op_name not in all_ops:
-            op_name = name
-        if op_name in all_ops:
-            op = all_ops[op_name]['type']
+        op = all_ops[name]['type']
+        print('e\'s op is', op)
 
-            if op in ('Add', 'Sub', 'Xor'):
-                operands = len(ins)
-                this_layer['eltwise'] = op
-                this_layer['operands'] = operands
-            elif op in ('Gemm', 'Transpose'):
-                this_layer['op'] = 'Linear'
-                main_op = 'Linear'
-            elif op == 'Conv':
-                kernel_size = all_ops[op_name]['attrs']['kernel_shape']
-                this_layer['op'] = f'Conv{len(kernel_size)}d'
-                main_op = op
-            elif op == 'ConvTranspose':
-                kernel_size = all_ops[op_name]['attrs']['kernel_shape']
-                this_layer['op'] = f'ConvTranspose{len(kernel_size)}d'
-                main_op = op
+        if op in ('Add', 'Sub', 'Xor'):
+            operands = len(ins)
+            this_layer['eltwise'] = op
+            this_layer['operands'] = operands
+        elif op == 'Gemm':
+            this_layer['op'] = 'Linear'
+            main_op = 'Linear'
+            this_layer['activate'] = 'None'
+        elif op == 'Conv':
+            kernel_size = all_ops[name]['attrs']['kernel_shape']
+            this_layer['op'] = f'Conv{len(kernel_size)}d'
+            this_layer['activate'] = 'None'
+            main_op = op
+        elif op == 'ConvTranspose':
+            kernel_size = all_ops[name]['attrs']['kernel_shape']
+            this_layer['op'] = f'ConvTranspose{len(kernel_size)}d'
+            this_layer['activate'] = 'None'
+            main_op = op
+        elif op in ('MaxPool', 'AveragePool'):
+            this_layer['op'] = op
+            shape = all_ops[name]['attrs']['kernel_shape']
+            if len(shape) == 1 or shape[0] == shape[1]:
+                shape = shape[0]
+            if all_ops[name]['type'] == 'MaxPool':
+                this_layer['max_pool'] = shape
             else:
-                this_layer['op'] = f'Unknown ({op})'
+                this_layer['avg_pool'] = shape
+            this_layer['pool_stride'] = all_ops[name]['attrs']['strides'][0]
+        elif op in ('Abs', 'Relu'):
+            this_layer['op'] = op
+            this_layer['activate'] = op
+        else:
+            this_layer['op'] = f'Unknown ({op})'
+            assert op == 'Conv', f'Found unknown op {op}'
 
-            if main_op in ['Conv', 'ConvTranspose']:
-                if len(kernel_size) == 1:
-                    this_layer['kernel_size'] = str(kernel_size[0])
-                else:
-                    this_layer['kernel_size'] = f'{kernel_size[0]}x{kernel_size[1]}'
-                pad = all_ops[op_name]['attrs']['pads']
-                this_layer['pad'] = pad[0]
-                groups = all_ops[op_name]['attrs']['group']
-                if groups != 1:
-                    this_layer['groups'] = groups
         this_layer['main_op'] = main_op
 
-        flatten: bool = False
-        pre_flattened_channel_count: int = 0
-        if prev_op_name != '':
-            ins = chase_inputs(name, ins)
-            # Don't set in_sequences when using strictly sequential single inputs
-            if len(ins) > 1 or (len(ins) > 0 and ins[0] != prev_op_name):
-                if operands > 1:
-                    ins.reverse()  # Reverse the list since PyTorch does it backwards
-                this_layer['in_sequences'] = ins
+        if main_op in ('Conv', 'ConvTranspose'):
+            if len(kernel_size) == 1:
+                this_layer['kernel_size'] = str(kernel_size[0])
+            else:
+                this_layer['kernel_size'] = f'{kernel_size[0]}x{kernel_size[1]}'
+            pad = all_ops[name]['attrs']['pads']
+            this_layer['pad'] = pad[0]
+            groups = all_ops[name]['attrs']['group']
+            if groups != 1:
+                this_layer['groups'] = groups
 
-            # Check whether inputs are flattened, and whether they were already flattened
-            # previously
-            flatten = True
-            in_dim: Optional[Union[Tuple[int, ...], List[int]]] = None
-            prev_dim: Optional[Union[Tuple[int, ...], List[int]]] = None
+            try:
+                quantization = int(model.get_parameter(canonical + '.weight_bits'))
+                if quantization == 0:
+                    quantization = 8
+            except AttributeError:
+                quantization = 8
+            if quantization != 8:
+                assert quantization in [1, 2, 4], f'{name}: quantization={quantization}'
+                this_layer['quantization'] = quantization
+
+        # Check whether inputs need to be flattened
+        flatten: bool = False
+        if main_op == 'Linear':
             for ie in inputs[name]:
                 if ie in shapes:
                     mult: int = 1
                     for x in shapes[ie]:
                         mult *= x
                     if shapes[ie][0] != mult:
-                        flatten = False
-            prev_flatten = True
-            for ie in ins:
-                if ie in outputs:
-                    for je in outputs[ie]:
-                        if je in shapes:
-                            mult = 1
-                            for x in shapes[je]:
+                        flatten = True
+            if flatten:
+                this_layer['flatten'] = 'true'
+
+        in_dim: Optional[Union[Tuple[int, ...], List[int]]] = None
+        prev_dim: Optional[Union[Tuple[int, ...], List[int]]] = None
+
+        # Check whether dimensions need to change
+        if not flatten:
+            mult = 1
+            for n in inputs[name]:
+                if n in shapes:
+                    for x in shapes[n]:
+                        mult *= x
+                    if len(shapes[n]) > 1 and mult != shapes[n][0]:
+                        in_dim = shapes[n][1:]
+                    else:
+                        in_dim = shapes[n]
+                    break
+            mult = 1
+            for n in ins:
+                if n in outputs:
+                    for o in outputs[n]:
+                        if o in shapes:
+                            for x in shapes[o]:
                                 mult *= x
-                            if shapes[je][0] != mult:
-                                prev_flatten = False
-                            pre_flattened_channel_count += shapes[je][0]
-            flatten = flatten and not prev_flatten
-
-            # Check whether dimensions need to change
-            if not flatten:
-                mult = 1
-                for n in inputs[name]:
-                    if n in shapes:
-                        for x in shapes[n]:
-                            mult *= x
-                        if len(shapes[n]) > 1 and mult != shapes[n][0]:
-                            in_dim = shapes[n][1:]
-                        else:
-                            in_dim = shapes[n]
-                        break
-                mult = 1
-                for n in ins:
-                    if n in outputs:
-                        for o in outputs[n]:
-                            if o in shapes:
-                                for x in shapes[o]:
-                                    mult *= x
-                                if len(shapes[o]) > 1 and mult != shapes[o][0]:
-                                    prev_dim = shapes[o][1:]
-                                else:
-                                    prev_dim = shapes[o]
-                                break
-                if in_dim is not None and prev_dim is not None:
-                    if in_dim != prev_dim \
-                       and (in_dim[0] != prev_dim[0] or len(in_dim) > 1 or mult != in_dim[0]):
-                        if len(in_dim) > 0:
-                            in_dim = list(in_dim)
-                        this_layer['in_dim'] = in_dim
-
-        if flatten:
-            this_layer['flatten'] = 'true'
+                            if len(shapes[o]) > 1 and mult != shapes[o][0]:
+                                prev_dim = shapes[o][1:]
+                            else:
+                                prev_dim = shapes[o]
+                            break
+            if in_dim is not None and prev_dim is not None:
+                if in_dim != prev_dim \
+                   and (in_dim[0] != prev_dim[0] or len(in_dim) > 1 or mult != in_dim[0]):
+                    if len(in_dim) > 0:
+                        in_dim = list(in_dim)
+                    this_layer['in_dim'] = in_dim
 
         # Find number of processors needed
         processors: int = 0
-        if operands == 1:
-            # Concatenate data
-            if not flatten:
-                for ie in inputs[name]:
-                    if ie in shapes:
-                        processors += shapes[ie][0]
-            else:
-                processors = pre_flattened_channel_count
-        else:
-            # Element-wise - interleaved data
-            for ie in inputs[name]:
-                if ie in shapes:
-                    processors += shapes[ie][0]
-                    break
+        for ie in inputs[name]:
+            if ie in shapes:
+                processors += shapes[ie][0]
+                if operands == 1:
+                    break  # Element-wise: data is interleaved, not concatenated
         this_layer['proc_count'] = processors
 
         # Inner layers and more than 16 channels are always HWC
@@ -369,39 +403,135 @@ def create(
             # Show input dimensions and data format for input layers
             this_layer['data_format'] = hwc
             input_hwc = hwc
-
-        activate: str = name + '.activate'
-        if activate in all_ops:
-            this_layer['activate'] = all_ops[activate]['type']
-        elif main_op in ['Conv', 'Linear']:
-            this_layer['activate'] = 'None'
-
-        pool: str = name + '.pool_Pad_1'
-        if pool not in all_ops:
-            pool = name + '.pool'
-        if pool in all_ops:
-            if all_ops[pool]['type'] == 'Constant':
-                pool += '_Pad_1'
-            shape = all_ops[pool]['attrs']['kernel_shape']
-            if len(shape) == 1 or shape[0] == shape[1]:
-                shape = shape[0]
-            if all_ops[pool]['type'] == 'MaxPool':
-                this_layer['max_pool'] = shape
-            else:
-                this_layer['avg_pool'] = shape
-            this_layer['pool_stride'] = all_ops[pool]['attrs']['strides'][0]
+        else:
+            # Don't set in_sequences when using strictly sequential single inputs
+            if len(ins) > 1 or (len(ins) > 0 and ins[0] != prev_op_name):
+                if operands > 1:
+                    ins.reverse()  # Reverse the list since PyTorch does it backwards
+                this_layer['in_sequences'] = ins
 
         prev_op_name = name
         layers[name] = this_layer
 
-    # 4 - Merge (fuse) element-wise and convolution layers
-    # TODO: There's an exception where this doesn't work in hardware.
-    # See train_cifar100_qat8_effnet2.sh
     prev_name: str = ''
     pop_list: List[Tuple[str, str]] = []
+    can_fuse: bool = True
+    prev: Dict[str, Any] = {}
+
+    # 4a - Merge (fuse) conv and activation layers
+    for count, (name, ll) in enumerate(layers.items()):
+        if ll['op'] in ('Abs', 'Relu') and prev_name != '':
+            prev = layers[prev_name]
+            # Check that no layer other than the activation layer uses the intermediate output of
+            # the conv layer as an input
+            can_fuse = True
+            for (other_name, ol) in layers.items():
+                if other_name != name and other_name != prev_name and 'in_sequences' in ol:
+                    if prev_name in ol['in_sequences']:
+                        can_fuse = False
+                        break
+            if can_fuse and prev['main_op'] in ('Conv', 'Linear'):
+                # Combine both layers
+                if 'comment' not in prev:
+                    prev['comment'] = f'{prev_name} fused with {name}'
+                else:
+                    prev['comment'] += f' and {name}'
+                pop_list.append((prev_name, name))  # Mark second layer for deletion
+                # Copy over convolution operation and keep the element-wise operation in place
+                prev['activate'] = ll['activate']
+                if 'output' in ll:
+                    prev['output'] = ll['output']
+                if 'quantization' in ll:
+                    prev['quantization'] = ll['quantization']
+                if 'output_width' in ll:
+                    prev['output_width'] = ll['output_width']
+                outputs[prev_name] = outputs[name]
+                inputs[name] = inputs[prev_name]
+                layers[prev_name] = prev
+
+        prev_name = name
+
+    # Delete the conv layers that were fused into the eltwise layer
+    for (prev_name, name) in pop_list:
+        # Change any dangling input sequences to the fused layer
+        for (other_name, ol) in layers.items():
+            if other_name != name and other_name != prev_name and 'in_sequences' in ol:
+                for i, e in enumerate(ol['in_sequences']):
+                    if e == name:
+                        ol['in_sequences'][i] = prev_name
+
+        # Delete the conv portion
+        layers.pop(name)
+
+    # 4b - Merge (fuse) pooling and conv layers
+    prev_name = ''
+    pop_list = []
+    can_fuse = True
+    prev = {}
+
+    for count, (name, ll) in enumerate(layers.items()):
+        if ll['main_op'] in ('Conv', 'Linear') and prev_name != '':
+            prev = layers[prev_name]
+            if prev['op'] not in ('MaxPool', 'AveragePool'):
+                continue
+            # Check that no layer other than the activation layer uses the intermediate output of
+            # the conv layer as an input
+            can_fuse = True
+            for (other_name, ol) in layers.items():
+                if other_name != name and other_name != prev_name and 'in_sequences' in ol:
+                    if prev_name in ol['in_sequences']:
+                        can_fuse = False
+                        break
+            if can_fuse:
+                # Combine both layers
+                if 'comment' not in ll:
+                    prev['comment'] = f'{prev_name} fused with {name}'
+                else:
+                    prev['comment'] = f'{prev_name} and ' + ll['comment']
+                pop_list.append((prev_name, name))  # Mark second layer for deletion
+                # Copy over convolution operation
+                prev['op'] = ll['op']
+                prev['main_op'] = ll['main_op']
+                if 'output' in ll:
+                    prev['output'] = ll['output']
+                if 'quantization' in ll:
+                    prev['quantization'] = ll['quantization']
+                if 'output_width' in ll:
+                    prev['output_width'] = ll['output_width']
+                if 'kernel_size' in ll:
+                    prev['kernel_size'] = ll['kernel_size']
+                if 'pad' in ll:
+                    prev['pad'] = ll['pad']
+                if 'groups' in ll:
+                    prev['groups'] = ll['groups']
+                if 'activate' in ll:
+                    prev['activate'] = ll['activate']
+                outputs[prev_name] = outputs[name]
+                inputs[name] = inputs[prev_name]
+                layers[prev_name] = prev
+
+        prev_name = name
+
+    # Delete the conv layers that were fused into the eltwise layer
+    for (prev_name, name) in pop_list:
+        # Change any dangling input sequences to the fused layer
+        for (other_name, ol) in layers.items():
+            if other_name != name and other_name != prev_name and 'in_sequences' in ol:
+                for i, e in enumerate(ol['in_sequences']):
+                    if e == name:
+                        ol['in_sequences'][i] = prev_name
+
+        # Delete the conv portion
+        layers.pop(name)
+
+    # 4c - Merge (fuse) element-wise and convolution layers
+    # TODO: There's an exception where this doesn't work in hardware.
+    # See train_cifar100_qat8_effnet2.sh
+    prev_name = ''
+    pop_list = []
     for count, (name, ll) in enumerate(layers.items()):
         if ll['main_op'] == 'Conv' and prev_name != '':
-            prev: Dict[str, Any] = layers[prev_name]
+            prev = layers[prev_name]
             # Only one pooling operation possible
             pool_count: int = 0
             if 'max_pool' in prev:
@@ -414,7 +544,7 @@ def create(
                 pool_count += 1
             # Check that no layer other than the conv layer uses the intermediate output of the
             # element-wise layer as an input
-            can_fuse: bool = True
+            can_fuse = True
             for (other_name, ol) in layers.items():
                 if other_name != name and other_name != prev_name and 'in_sequences' in ol:
                     if prev_name in ol['in_sequences']:
@@ -427,7 +557,10 @@ def create(
                 can_fuse = False
             if can_fuse:
                 # Combine both layers
-                prev['comment'] = f'{prev_name} fused with {name}'
+                if 'comment' not in ll:
+                    prev['comment'] = f'{prev_name} fused with {name}'
+                else:
+                    prev['comment'] = f'{prev_name} and ' + ll['comment']
                 pop_list.append((prev_name, name))  # Mark second layer for deletion
                 # Copy over convolution operation and keep the element-wise operation in place
                 prev['op'] = ll['op']
@@ -582,7 +715,7 @@ def create(
         for count, (name, ll) in enumerate(layers.items()):
             f.write('\n'
                     f'  # Layer {count}\n'
-                    f'  - name: {name}')
+                    f'  - name: {canonical_name(name)}')
             if 'comment' in ll:
                 f.write(f"  # {ll['comment']}")
             f.write('\n')
@@ -621,7 +754,7 @@ def create(
                 for i, ie in enumerate(ins):
                     if i > 0:
                         f.write(', ')
-                    f.write(ie)
+                    f.write(canonical_name(ie))
                 f.write(']\n')
             if 'in_dim' in ll:
                 f.write(f"    in_dim: {ll['in_dim']}\n")
