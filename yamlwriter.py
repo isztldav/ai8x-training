@@ -33,10 +33,10 @@ def allocate_processors(
     """
     if hwc:
         # Inner layers are always HWC
-        if count > 64:
-            count = 64
+        count = min(count, 64)  # Multi-pass
         return (1 << count) - 1
 
+    assert count <= 16
     # Pick the first for every quadrant (FIFO compatible) or one every 4
     mult = 16 if count <= 4 else 4
     val: int = 0
@@ -62,6 +62,7 @@ def allocate_offset(
     return HALF_DATA if prev_offset == 0 else 0
 
 
+# pylint: disable=too-many-branches, too-many-statements
 def create(
         model: Any,
         dataset: str,
@@ -261,11 +262,7 @@ def create(
 
         flatten: bool = False
         pre_flattened_channel_count: int = 0
-        if prev_op_name == '':
-            # Show input dimensions and data format for input layers
-            this_layer['data_format'] = hwc
-            input_hwc = hwc
-        else:
+        if prev_op_name != '':
             ins = chase_inputs(name, ins)
             # Don't set in_sequences when using strictly sequential single inputs
             if len(ins) > 1 or (len(ins) > 0 and ins[0] != prev_op_name):
@@ -337,6 +334,12 @@ def create(
 
         # Inner layers and more than 16 channels are always HWC
         hwc = hwc or (processors > 16) or (prev_op_name != '')
+
+        if prev_op_name == '':
+            # Show input dimensions and data format for input layers
+            this_layer['data_format'] = hwc
+            input_hwc = hwc
+
         activate: str = name + '.activate'
         if activate in all_ops:
             this_layer['activate'] = all_ops[activate]['type']
@@ -385,10 +388,11 @@ def create(
                     if prev_name in ol['in_sequences']:
                         can_fuse = False
                         break
-            if can_fuse \
-               and 'in_sequences' not in ll and 'in_dim' not in ll and 'flatten' not in ll \
-               and prev['main_op'] == 'Passthrough' and prev['operands'] > 1 \
-               and pool_count <= 1:
+            if 'in_sequences' in ll or 'in_dim' in ll or 'flatten' in ll:
+                can_fuse = False
+            if prev['main_op'] != 'Passthrough' or prev['operands'] == 1 or pool_count > 1:
+                can_fuse = False
+            if can_fuse:
                 # Combine both layers
                 prev['comment'] = f'{prev_name} fused with {name}'
                 pop_list.append((prev_name, name))  # Mark second layer for deletion
@@ -449,7 +453,7 @@ def create(
             must_insert: bool = False
             prev_name = ''
             for (other_name, ol) in layers.items():
-                if other_name != name and other_name != source:
+                if other_name not in (name, source):
                     if 'in_sequences' in ol:
                         for e in ol['in_sequences']:
                             if e == source:
@@ -508,13 +512,13 @@ def create(
         processors = ll['proc_count']
         hwc = ll['data_format'] if 'data_format' in ll else True
         if processors == 0:
-            layers[name]['processors'] = 0  # Unknown
+            ll['processors'] = 0  # Unknown
         else:
             processors = allocate_processors(name, processors, hwc=hwc)
-            layers[name]['processors'] = processors
+            ll['processors'] = processors
 
         out_offset = allocate_offset(name, processors, out_offset)
-        layers[name]['out_offset'] = out_offset
+        ll['out_offset'] = out_offset
 
     # 7 - Print
     with open(filename, mode='w', encoding='utf-8') as f:

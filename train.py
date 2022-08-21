@@ -399,7 +399,7 @@ def main():
     if args.summary:
         return summarize_model(model, args.dataset, which_summary=args.summary,
                                filename=args.summary_filename)
-    elif args.yaml_template:
+    if args.yaml_template:
         return yamlwriter.create(
             model,
             args.dataset,
