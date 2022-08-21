@@ -133,48 +133,104 @@ def create(
             return s[:separator]
         return s
 
-    def ignore_layer(name: str, op: str) -> bool:
+    def ignore_layer(name: str, layer: Dict[str, Any]) -> bool:
         """
         Remove these layers from the graph
         """
-        return op in ('Cast', 'Concat', 'Constant', 'Gather', 'Max', 'Min', 'Mul', 'Pow',
-                      'Reshape', 'Transpose', 'Shape', 'Squeeze', 'Unsqueeze') \
-            or name.startswith('top_level_op')
+        if not layer['inputs'] or not layer['outputs']:
+            return True  # Not consuming or producing anything, useless layer
+        return layer['type'] not in (
+            'Add', 'Sub', 'Xor',  # element-wise
+            'Gemm',  # fc
+            'Conv', 'ConvTranspose',
+            'MaxPool', 'AveragePool',
+            'Abs', 'Relu',
+        )
 
-    # 0 - Remove layers
+    # 1 - Remove inputs with zero dimensions
+    remove_list: List[str] = []
+    for n in all_ops:
+        s: List[str] = all_ops[n]['inputs']
+        all_ops[n]['original_inputs'] = s
+        remove: bool = False
+        new: List[str] = []
+        for i in s:
+            if i in shapes:
+                new.append(i)
+            else:
+                remove = True
+                remove_list.append(i)
+        if remove:
+            all_ops[n]['inputs'] = new
+
+        s = all_ops[n]['outputs']
+        remove = False
+        new = []
+        for i in s:
+            if i in shapes:
+                new.append(i)
+            else:
+                remove = True
+                remove_list.append(i)
+        if remove:
+            all_ops[n]['outputs'] = new
+
+    # 2 - Remove layers
     ignore_layers: List[str] = []
-    for e in all_ops:
-        if ignore_layer(e, all_ops[e]['type']):
-            ignore_layers.append(e)
+    for n in all_ops:
+        if ignore_layer(n, all_ops[n]):
+            ignore_layers.append(n)
+
+    def follow_chain(
+            layer: str,
+            remove: str,
+            replacements: List[str],
+            which: str,
+    ) -> None:
+        for n in all_ops:
+            if layer == n:
+                continue
+            for an_output in remove:
+                new_inputs: List[str] = []
+                # if all_ops[n][which]:
+                #     print(which, 'checking layer', n, 'inputs', all_ops[n]['inputs'],
+                #           'outputs:', all_ops[n]['outputs'])
+                for an_input in all_ops[n][which]:
+                    if an_output == an_input:
+                        # print('Found output', an_output,
+                        #       'as', which, 'in layer', n,
+                        #       'replacing with:', replacements)
+                        new_inputs += replacements
+                    else:
+                        # print('checking', check_input, 'is not replaced')
+                        new_inputs.append(an_input)
+
+                filtered: List[str] = []
+                for ie in new_inputs:
+                    if ie not in filtered:
+                        filtered.append(ie)
+                if filtered != all_ops[n][which]:
+                    # print('replacing', which, 'for layer', n, all_ops[n][which], '->',
+                    #       new_inputs)
+                    all_ops[n][which] = filtered
 
     # Fix up inputs after removing a layer
-    for check_layer in ignore_layers:
-        ignore_layer_inputs = all_ops[check_layer]['inputs']
-        ignore_layer_outputs = all_ops[check_layer]['outputs']
-        # Look for check_layer's outputs in the inputs of all other layers and replace
-        for n in all_ops:
-            if ignore_layer(n, all_ops[n]['type']):
-                continue
-            # print('layer', n, 'type is', all_ops[n]['type'])
-            if check_layer != n:
-                for remove_output in ignore_layer_outputs:
-                    new_inputs: List[str] = []
-                    # print('checking layer', n, 'inputs:', all_ops[n]['inputs'])
-                    for check_input in all_ops[n]['inputs']:
-                        if remove_output == check_input:
-                            # print('Found output', remove_output, 'from layer', check_layer,
-                            #       'as input in another layer', n,
-                            #       'replacing with e\'s inputs:', ignore_layer_inputs)
-                            new_inputs += ignore_layer_inputs
-                        else:
-                            # print('checking', check_input, 'is not replaced')
-                            new_inputs.append(check_input)
-                    if new_inputs != all_ops[n]['inputs']:
-                        # print('replacing inputs for layer', n, all_ops[n]['inputs'], '->',
-                        #       new_inputs)
-                        all_ops[n]['inputs'] = new_inputs
+    # c = 0
+    for layer in ignore_layers:
+        ignore_layer_inputs = all_ops[layer]['inputs']
+        ignore_layer_outputs = all_ops[layer]['outputs']
+        # print(c, '----------------------------', 'working on removing', layer,
+        #       ' with inputs', ignore_layer_inputs, 'and outputs', ignore_layer_outputs)
+        # c += 1
+        # Look for layer's outputs in the inputs of all other layers and replace
+        follow_chain(
+            layer,
+            remove=ignore_layer_outputs,
+            replacements=ignore_layer_inputs,
+            which='inputs',
+        )
 
-    # 1 - Associate inputs and outputs
+    # 3 - Associate inputs and outputs
     input_layer: Dict[str, str] = {}
     output_layer: Dict[str, str] = {}
     final_layer: str = ''
@@ -190,18 +246,21 @@ def create(
 
         final_layer = name
 
-    # 2 - Collect inputs and outputs
+    # 4 - Collect inputs and outputs
     inputs: Dict[str, List[str]] = {}
     outputs: Dict[str, List[str]] = {}
 
     for name in all_ops:
-        if ignore_layer(name, all_ops[name]['type']):
+        if ignore_layer(name, all_ops[name]):
             continue
 
         # Get input names from first of the layer group
         if name not in inputs:
             inputs[name] = []
         for ie in all_ops[name]['inputs']:
+            # Ignore weights and biases (uses hard-coded names from ai8x.py)
+            if ie.endswith('.output_shift'):
+                print('ALERT: found output_shift in input to layer', name)
             if ie != '' and not ie.endswith('.op.bias') and not ie.endswith('.op.weight') \
                and not ie.endswith('.output_shift'):
                 if ie not in output_layer or output_layer[ie] != name:
@@ -213,7 +272,7 @@ def create(
             if ie != '' and (ie not in input_layer or input_layer[ie] != name):
                 outputs[name].append(ie)
 
-    # 3 - Collect ops
+    # 5 - Collect ops
     prev_op_name: str = ''
 
     def chase_inputs(
@@ -223,21 +282,23 @@ def create(
     ) -> List[str]:
         ret: List[str] = []
 
-        # print('chasing', ins)
+        print('layer', layer, 'chasing', ins)
         for ie in ins:
             if ie == layer:
                 continue
             n = ie
-            # print('looking at', n)
+            print('looking at', n)
             if n in output_layer:
                 n = output_layer[n]
-                # print('one down', n)
+                print('one down', n)
                 if n in output_layer and output_layer[n] != layer:
+                    print('adding', output_layer[n])
                     ret.append(output_layer[n])
 
             if n in inputs and inputs[n]:
                 val: List[str] = chase_inputs(layer, all_ops, inputs[n])
                 if val:
+                    print('adding []=', val)
                     ret += val
 
         filtered: List[str] = []
@@ -251,7 +312,8 @@ def create(
     input_hwc: bool = False
 
     for name in all_ops:
-        if ignore_layer(name, all_ops[name]['type']):
+        if ignore_layer(name, all_ops[name]):
+            # print('ignoring', name, 'with type', all_ops[name]['type'])
             continue
         canonical = canonical_name(name)
         # print('layer:', name, canonical)
@@ -259,8 +321,9 @@ def create(
 
         this_layer['name'] = canonical
         ins = inputs[name]
-        if prev_op_name != '':
-            ins = chase_inputs(name, all_ops, ins)
+        # if prev_op_name != '':
+        #     ins = chase_inputs(name, all_ops, ins)
+        # print('L', name, 'ins now', ins, 'outputs are', all_ops[name]['outputs'])
 
         # Mark output layers (the final layer is always an output layer)
         if name != final_layer and any(x not in input_layer for x in outputs[name]):
@@ -268,19 +331,11 @@ def create(
             # print(name, 'input_layer', input_layer)
             this_layer['output'] = 'true'
 
-        clamp: str = canonical + '.clamp'
-        if clamp in all_ops and 'value' in all_ops[clamp]['attrs']:
-            clamp_val = int(all_ops[clamp]['attrs']['value'])
-            assert clamp_val in [-1, -32768]
-            if clamp_val == -32768:
-                this_layer['output_width'] = 32
-
         this_layer['op'] = 'Passthrough'
         main_op = 'Passthrough'
         operands: int = 1
 
         op = all_ops[name]['type']
-        print('e\'s op is', op)
 
         if op in ('Add', 'Sub', 'Xor'):
             operands = len(ins)
@@ -315,7 +370,6 @@ def create(
             this_layer['activate'] = op
         else:
             this_layer['op'] = f'Unknown ({op})'
-            assert op == 'Conv', f'Found unknown op {op}'
 
         this_layer['main_op'] = main_op
 
@@ -330,6 +384,7 @@ def create(
             if groups != 1:
                 this_layer['groups'] = groups
 
+            # Quantization uses hard-coded name from ai8x.py
             try:
                 quantization = int(model.get_parameter(canonical + '.weight_bits'))
                 if quantization == 0:
@@ -340,7 +395,16 @@ def create(
                 assert quantization in [1, 2, 4], f'{name}: quantization={quantization}'
                 this_layer['quantization'] = quantization
 
-        # Check whether inputs need to be flattened
+        # Clamping? Using hard-coded name from ai8x.py
+        if main_op in ('Conv', 'ConvTranspose', 'Linear'):
+            clamp: str = canonical + '.clamp'
+            if clamp in all_ops and 'value' in all_ops[clamp]['attrs']:
+                clamp_val = int(all_ops[clamp]['attrs']['value'])
+                assert clamp_val in [-1, -32768]
+                if clamp_val == -32768:
+                    this_layer['output_width'] = 32
+
+        # Check whether inputs need to be flattened (when they are not in 1x1 dimensions)
         flatten: bool = False
         if main_op == 'Linear':
             for ie in inputs[name]:
@@ -369,23 +433,21 @@ def create(
                         in_dim = shapes[n]
                     break
             mult = 1
-            for n in ins:
-                if n in outputs:
-                    for o in outputs[n]:
-                        if o in shapes:
-                            for x in shapes[o]:
-                                mult *= x
-                            if len(shapes[o]) > 1 and mult != shapes[o][0]:
-                                prev_dim = shapes[o][1:]
-                            else:
-                                prev_dim = shapes[o]
-                            break
+            for n in all_ops[name]['original_inputs']:
+                if n in shapes:
+                    for x in shapes[n]:
+                        mult *= x
+                    if len(shapes[n]) > 1 and mult != shapes[n][0]:
+                        prev_dim = shapes[n][1:]
+                    else:
+                        prev_dim = shapes[n]
+                    break
             if in_dim is not None and prev_dim is not None:
                 if in_dim != prev_dim \
-                   and (in_dim[0] != prev_dim[0] or len(in_dim) > 1 or mult != in_dim[0]):
-                    if len(in_dim) > 0:
-                        in_dim = list(in_dim)
-                    this_layer['in_dim'] = in_dim
+                   and (in_dim[0] != prev_dim[0] or len(prev_dim) > 1 or mult != prev_dim[0]):
+                    if len(prev_dim) > 0:
+                        prev_dim = list(prev_dim)
+                    this_layer['in_dim'] = prev_dim
 
         # Find number of processors needed
         processors: int = 0
@@ -405,6 +467,9 @@ def create(
             input_hwc = hwc
         else:
             # Don't set in_sequences when using strictly sequential single inputs
+            # print('in_sequences candidates for', name, ins, end='')
+            ins = [output_layer[x] for x in ins]
+            # print(' translated to layers:', ins)
             if len(ins) > 1 or (len(ins) > 0 and ins[0] != prev_op_name):
                 if operands > 1:
                     ins.reverse()  # Reverse the list since PyTorch does it backwards
@@ -418,7 +483,7 @@ def create(
     can_fuse: bool = True
     prev: Dict[str, Any] = {}
 
-    # 4a - Merge (fuse) conv and activation layers
+    # 6a - Merge (fuse) conv and activation layers
     for count, (name, ll) in enumerate(layers.items()):
         if ll['op'] in ('Abs', 'Relu') and prev_name != '':
             prev = layers[prev_name]
@@ -463,7 +528,7 @@ def create(
         # Delete the conv portion
         layers.pop(name)
 
-    # 4b - Merge (fuse) pooling and conv layers
+    # 6b - Merge (fuse) pooling and conv layers
     prev_name = ''
     pop_list = []
     can_fuse = True
@@ -524,7 +589,7 @@ def create(
         # Delete the conv portion
         layers.pop(name)
 
-    # 4c - Merge (fuse) element-wise and convolution layers
+    # 6c - Merge (fuse) element-wise and convolution layers
     # TODO: There's an exception where this doesn't work in hardware.
     # See train_cifar100_qat8_effnet2.sh
     prev_name = ''
@@ -550,45 +615,46 @@ def create(
                     if prev_name in ol['in_sequences']:
                         can_fuse = False
                         break
+            if not can_fuse:
+                continue
             if 'in_sequences' in ll or 'in_dim' in ll or 'flatten' in ll:
-                can_fuse = False
+                continue
             if prev['main_op'] != 'Passthrough' or 'operands' not in prev \
                or prev['operands'] == 1 or pool_count > 1:
-                can_fuse = False
-            if can_fuse:
-                # Combine both layers
-                if 'comment' not in ll:
-                    prev['comment'] = f'{prev_name} fused with {name}'
-                else:
-                    prev['comment'] = f'{prev_name} and ' + ll['comment']
-                pop_list.append((prev_name, name))  # Mark second layer for deletion
-                # Copy over convolution operation and keep the element-wise operation in place
-                prev['op'] = ll['op']
-                prev['main_op'] = ll['main_op']
-                if 'output' in ll:
-                    prev['output'] = ll['output']
-                if 'quantization' in ll:
-                    prev['quantization'] = ll['quantization']
-                if 'output_width' in ll:
-                    prev['output_width'] = ll['output_width']
-                if 'kernel_size' in ll:
-                    prev['kernel_size'] = ll['kernel_size']
-                if 'pad' in ll:
-                    prev['pad'] = ll['pad']
-                if 'groups' in ll:
-                    prev['groups'] = ll['groups']
-                if 'activate' in ll:
-                    prev['activate'] = ll['activate']
-                if 'max_pool' in ll:
-                    prev['max_pool'] = ll['max_pool']
-                    prev['pool_first'] = 'false'
-                if 'avg_pool' in ll:
-                    prev['avg_pool'] = ll['avg_pool']
-                    prev['pool_first'] = 'false'
-                if 'pool_stride' in ll:
-                    prev['pool_stride'] = ll['pool_stride']
-                outputs[prev_name] = outputs[name]
-                inputs[name] = inputs[prev_name]
+                continue
+            # Combine both layers
+            if 'comment' not in ll:
+                prev['comment'] = f'{prev_name} fused with {name}'
+            else:
+                prev['comment'] = f'{prev_name} and ' + ll['comment']
+            pop_list.append((prev_name, name))  # Mark second layer for deletion
+            # Copy over convolution operation and keep the element-wise operation in place
+            prev['op'] = ll['op']
+            prev['main_op'] = ll['main_op']
+            if 'output' in ll:
+                prev['output'] = ll['output']
+            if 'quantization' in ll:
+                prev['quantization'] = ll['quantization']
+            if 'output_width' in ll:
+                prev['output_width'] = ll['output_width']
+            if 'kernel_size' in ll:
+                prev['kernel_size'] = ll['kernel_size']
+            if 'pad' in ll:
+                prev['pad'] = ll['pad']
+            if 'groups' in ll:
+                prev['groups'] = ll['groups']
+            if 'activate' in ll:
+                prev['activate'] = ll['activate']
+            if 'max_pool' in ll:
+                prev['max_pool'] = ll['max_pool']
+                prev['pool_first'] = 'false'
+            if 'avg_pool' in ll:
+                prev['avg_pool'] = ll['avg_pool']
+                prev['pool_first'] = 'false'
+            if 'pool_stride' in ll:
+                prev['pool_stride'] = ll['pool_stride']
+            outputs[prev_name] = outputs[name]
+            inputs[name] = inputs[prev_name]
 
         prev_name = name
 
@@ -604,7 +670,7 @@ def create(
         # Delete the conv portion
         layers.pop(name)
 
-    # 5 - Insert passthrough layers for write_gap
+    # 7 - Insert passthrough layers for write_gap
     write_gap_list: List[Tuple[str, int]] = []
     insert_list: List[Tuple[str, int]] = []
     source_list: List[Tuple[str, str]] = []
@@ -612,13 +678,19 @@ def create(
         # There are two cases: element-wise operations ('operands' defined and > 1), and conv
         # operations with multi-pass (> 64 input channels). In either case, in_sequences has
         # more than one member.
+        # print('*', name, ll['in_sequences'] if 'in_sequences' in ll else '--')
         if 'in_sequences' not in ll or len(ll['in_sequences']) < 2:
             continue
         operands = ll['operands'] if 'operands' in ll else 1
+        # print('still here, have', operands, 'operands', 'and a proc_count of', ll['proc_count'])
         if operands == 1:
-            if ll['proc_count'] <= 64:
-                continue
             operands = len(ll['in_sequences'])
+            # Concat instead of interleave for small channel counts
+            if ll['proc_count'] * operands <= 64:
+                ll['proc_count'] *= operands
+                continue
+        # print('checking in_sequences for layer', name, ll['in_sequences'], 'with', operands,
+        #       'operands')
         # For each input, check whether anybody else is using the input. If yes, insert a dummy
         # layer that creates a write_gap version of the data. If no, add the write_gap to the
         # producer.
@@ -636,6 +708,7 @@ def create(
                         # Break the sequence
                         ol['in_sequences'] = [source]
                 prev_name = other_name
+            # print('must_insert for', source, 'is', must_insert)
             if not must_insert:
                 # The source is used only by the element-wise layer, so we can insert the write gap
                 # directly
@@ -644,7 +717,7 @@ def create(
                 insert_list.append((source, operands))
                 # Replace source with source_gap in layers[name]['in_sequences']
                 source_list.append((name, source))
-                new_name = source + '_gap'
+                new_name = 'gap_' + source
                 # ...and insert shaope information (input and output are both the same as the
                 # original layer's output)
                 inputs[new_name] = [source + '_data']
@@ -662,11 +735,11 @@ def create(
         seq = layers[name]['in_sequences']
         for i, s in enumerate(seq):
             if s == source:
-                seq[i] = source + '_gap'
+                seq[i] = 'gap_' + source
     # Insert additional layers
     for (name, gap) in insert_list:
         new_layer: Dict[str, Any] = {}
-        new_name = name + '_gap'
+        new_name = 'gap_' + name
         new_layer['name'] = new_name
         processors = 0
         for ie in inputs[new_name]:
@@ -674,7 +747,7 @@ def create(
                 processors += shapes[ie][0]
         new_layer['proc_count'] = processors
         new_layer['op'] = 'Passthrough'
-        new_layer['name'] = name + '_gap'
+        new_layer['name'] = 'gap_' + name
         new_layer['write_gap'] = gap - 1
 
         # Insert into dict via list
@@ -683,7 +756,7 @@ def create(
         layers_list.insert(insert_pos, (new_name, new_layer))
         layers = dict(layers_list)
 
-    # 6 - TODO: Assign processors and output_offset
+    # 8 - TODO: Assign processors and output_offset
     out_offset = 0  # Start at 0 (default input offset)
     for (name, ll) in layers.items():
         processors = ll['proc_count']
@@ -697,7 +770,7 @@ def create(
         out_offset = allocate_offset(name, processors, out_offset)
         ll['out_offset'] = out_offset
 
-    # 7 - Print
+    # 9 - Print
     with open(filename, mode='w', encoding='utf-8') as f:
         f.write(
             '---\n'
