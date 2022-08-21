@@ -11,9 +11,11 @@ Generate YAML template from PyTorch model
 
 TODO: Implement smart processor and data memory allocator (out_offset, in_offset)
 TODO: Implement dilation
-TODO: Remove layer fusing for certain cases where hardware is not compatible
-      (see train_cifar100_qat8_effnet2.sh)
 TODO: Testing
+
+NOTE: This code somewhat depends on ai8x.py. Weight and bias parameters are expected to be called
+'.op.weight' and 'op.bias'. Quantization information is expected in '.weight_bits' and the output
+width is inferred from name + '.clamp'.
 """
 from typing import Any, Dict, List, Optional, OrderedDict, Tuple, Union
 
@@ -274,61 +276,20 @@ def create(
 
     # 5 - Collect ops
     prev_op_name: str = ''
-
-    def chase_inputs(
-            layer: str,
-            all_ops: OrderedDict[str, Dict[str, Any]],
-            ins: List[str],
-    ) -> List[str]:
-        ret: List[str] = []
-
-        print('layer', layer, 'chasing', ins)
-        for ie in ins:
-            if ie == layer:
-                continue
-            n = ie
-            print('looking at', n)
-            if n in output_layer:
-                n = output_layer[n]
-                print('one down', n)
-                if n in output_layer and output_layer[n] != layer:
-                    print('adding', output_layer[n])
-                    ret.append(output_layer[n])
-
-            if n in inputs and inputs[n]:
-                val: List[str] = chase_inputs(layer, all_ops, inputs[n])
-                if val:
-                    print('adding []=', val)
-                    ret += val
-
-        filtered: List[str] = []
-        for ie in ret:
-            if ie not in filtered:
-                filtered.append(ie)
-
-        return filtered
-
     layers: Dict[str, Dict[str, Any]] = {}
     input_hwc: bool = False
 
     for name in all_ops:
         if ignore_layer(name, all_ops[name]):
-            # print('ignoring', name, 'with type', all_ops[name]['type'])
             continue
         canonical = canonical_name(name)
-        # print('layer:', name, canonical)
         this_layer: Dict[str, Any] = {}
 
         this_layer['name'] = canonical
         ins = inputs[name]
-        # if prev_op_name != '':
-        #     ins = chase_inputs(name, all_ops, ins)
-        # print('L', name, 'ins now', ins, 'outputs are', all_ops[name]['outputs'])
 
         # Mark output layers (the final layer is always an output layer)
         if name != final_layer and any(x not in input_layer for x in outputs[name]):
-            # print(name, 'outputs:', outputs[name])
-            # print(name, 'input_layer', input_layer)
             this_layer['output'] = 'true'
 
         this_layer['op'] = 'Passthrough'
@@ -396,6 +357,7 @@ def create(
                 this_layer['quantization'] = quantization
 
         # Clamping? Using hard-coded name from ai8x.py
+        # Also use the hard-coded bias name to record whether a bias is used in the convolution.
         if main_op in ('Conv', 'ConvTranspose', 'Linear'):
             clamp: str = canonical + '.clamp'
             if clamp in all_ops and 'value' in all_ops[clamp]['attrs']:
@@ -403,6 +365,13 @@ def create(
                 assert clamp_val in [-1, -32768]
                 if clamp_val == -32768:
                     this_layer['output_width'] = 32
+
+            have_bias: bool = False
+            for e in all_ops[name]['inputs']:
+                if e.endswith('.op.bias'):
+                    have_bias = True
+                    break
+            this_layer['have_bias'] = have_bias
 
         # Check whether inputs need to be flattened (when they are not in 1x1 dimensions)
         flatten: bool = False
@@ -480,39 +449,42 @@ def create(
 
     prev_name: str = ''
     pop_list: List[Tuple[str, str]] = []
-    can_fuse: bool = True
+    veto: bool = False
     prev: Dict[str, Any] = {}
 
     # 6a - Merge (fuse) conv and activation layers
     for count, (name, ll) in enumerate(layers.items()):
         if ll['op'] in ('Abs', 'Relu') and prev_name != '':
             prev = layers[prev_name]
+            if prev['main_op'] not in ('Conv', 'Linear'):
+                continue
             # Check that no layer other than the activation layer uses the intermediate output of
             # the conv layer as an input
-            can_fuse = True
+            veto = False
             for (other_name, ol) in layers.items():
                 if other_name != name and other_name != prev_name and 'in_sequences' in ol:
                     if prev_name in ol['in_sequences']:
-                        can_fuse = False
+                        veto = True
                         break
-            if can_fuse and prev['main_op'] in ('Conv', 'Linear'):
-                # Combine both layers
-                if 'comment' not in prev:
-                    prev['comment'] = f'{prev_name} fused with {name}'
-                else:
-                    prev['comment'] += f' and {name}'
-                pop_list.append((prev_name, name))  # Mark second layer for deletion
-                # Copy over convolution operation and keep the element-wise operation in place
-                prev['activate'] = ll['activate']
-                if 'output' in ll:
-                    prev['output'] = ll['output']
-                if 'quantization' in ll:
-                    prev['quantization'] = ll['quantization']
-                if 'output_width' in ll:
-                    prev['output_width'] = ll['output_width']
-                outputs[prev_name] = outputs[name]
-                inputs[name] = inputs[prev_name]
-                layers[prev_name] = prev
+            if veto:
+                continue
+            # Combine both layers
+            if 'comment' not in prev:
+                prev['comment'] = f'{prev_name} fused with {name}'
+            else:
+                prev['comment'] += f' and {name}'
+            pop_list.append((prev_name, name))  # Mark second layer for deletion
+            # Copy over convolution operation and keep the element-wise operation in place
+            prev['activate'] = ll['activate']
+            if 'output' in ll:
+                prev['output'] = ll['output']
+            if 'quantization' in ll:
+                prev['quantization'] = ll['quantization']
+            if 'output_width' in ll:
+                prev['output_width'] = ll['output_width']
+            outputs[prev_name] = outputs[name]
+            inputs[name] = inputs[prev_name]
+            layers[prev_name] = prev
 
         prev_name = name
 
@@ -531,7 +503,7 @@ def create(
     # 6b - Merge (fuse) pooling and conv layers
     prev_name = ''
     pop_list = []
-    can_fuse = True
+    veto = False
     prev = {}
 
     for count, (name, ll) in enumerate(layers.items()):
@@ -541,39 +513,42 @@ def create(
                 continue
             # Check that no layer other than the activation layer uses the intermediate output of
             # the conv layer as an input
-            can_fuse = True
+            veto = False
             for (other_name, ol) in layers.items():
                 if other_name != name and other_name != prev_name and 'in_sequences' in ol:
                     if prev_name in ol['in_sequences']:
-                        can_fuse = False
+                        veto = True
                         break
-            if can_fuse:
-                # Combine both layers
-                if 'comment' not in ll:
-                    prev['comment'] = f'{prev_name} fused with {name}'
-                else:
-                    prev['comment'] = f'{prev_name} and ' + ll['comment']
-                pop_list.append((prev_name, name))  # Mark second layer for deletion
-                # Copy over convolution operation
-                prev['op'] = ll['op']
-                prev['main_op'] = ll['main_op']
-                if 'output' in ll:
-                    prev['output'] = ll['output']
-                if 'quantization' in ll:
-                    prev['quantization'] = ll['quantization']
-                if 'output_width' in ll:
-                    prev['output_width'] = ll['output_width']
-                if 'kernel_size' in ll:
-                    prev['kernel_size'] = ll['kernel_size']
-                if 'pad' in ll:
-                    prev['pad'] = ll['pad']
-                if 'groups' in ll:
-                    prev['groups'] = ll['groups']
-                if 'activate' in ll:
-                    prev['activate'] = ll['activate']
-                outputs[prev_name] = outputs[name]
-                inputs[name] = inputs[prev_name]
-                layers[prev_name] = prev
+            if veto:
+                continue
+            # Combine both layers
+            if 'comment' not in ll:
+                prev['comment'] = f'{prev_name} fused with {name}'
+            else:
+                prev['comment'] = f'{prev_name} and ' + ll['comment']
+            pop_list.append((prev_name, name))  # Mark second layer for deletion
+            # Copy over convolution operation
+            prev['op'] = ll['op']
+            prev['main_op'] = ll['main_op']
+            if 'output' in ll:
+                prev['output'] = ll['output']
+            if 'quantization' in ll:
+                prev['quantization'] = ll['quantization']
+            if 'output_width' in ll:
+                prev['output_width'] = ll['output_width']
+            if 'kernel_size' in ll:
+                prev['kernel_size'] = ll['kernel_size']
+            if 'pad' in ll:
+                prev['pad'] = ll['pad']
+            if 'groups' in ll:
+                prev['groups'] = ll['groups']
+            if 'activate' in ll:
+                prev['activate'] = ll['activate']
+            if 'have_bias' in ll:
+                prev['have_bias'] = ll['have_bias']
+            outputs[prev_name] = outputs[name]
+            inputs[name] = inputs[prev_name]
+            layers[prev_name] = prev
 
         prev_name = name
 
@@ -590,8 +565,6 @@ def create(
         layers.pop(name)
 
     # 6c - Merge (fuse) element-wise and convolution layers
-    # TODO: There's an exception where this doesn't work in hardware.
-    # See train_cifar100_qat8_effnet2.sh
     prev_name = ''
     pop_list = []
     for count, (name, ll) in enumerate(layers.items()):
@@ -609,18 +582,21 @@ def create(
                 pool_count += 1
             # Check that no layer other than the conv layer uses the intermediate output of the
             # element-wise layer as an input
-            can_fuse = True
+            veto = False
             for (other_name, ol) in layers.items():
                 if other_name != name and other_name != prev_name and 'in_sequences' in ol:
                     if prev_name in ol['in_sequences']:
-                        can_fuse = False
+                        veto = True
                         break
-            if not can_fuse:
+            if veto:
                 continue
             if 'in_sequences' in ll or 'in_dim' in ll or 'flatten' in ll:
                 continue
             if prev['main_op'] != 'Passthrough' or 'operands' not in prev \
                or prev['operands'] == 1 or pool_count > 1:
+                continue
+            # MAX78002 - avoid element-wise with bias and convolution when using multi-pass
+            if ai8x.dev.device == 87 and ll['have_bias'] and prev['proc_count'] > 64:
                 continue
             # Combine both layers
             if 'comment' not in ll:
