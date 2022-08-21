@@ -41,7 +41,7 @@ def allocate_processors(
     mult = 16 if count <= 4 else 4
     val: int = 0
     for i in range(count):
-        val |= 1 << (mult * i)
+        val |= 1 << mult * i
     return val
 
 
@@ -266,7 +266,8 @@ def create(
             ins = chase_inputs(name, ins)
             # Don't set in_sequences when using strictly sequential single inputs
             if len(ins) > 1 or (len(ins) > 0 and ins[0] != prev_op_name):
-                ins.reverse()  # Reverse the list since PyTorch does it backwards
+                if operands > 1:
+                    ins.reverse()  # Reverse the list since PyTorch does it backwards
                 this_layer['in_sequences'] = ins
 
             # Check whether inputs are flattened, and whether they were already flattened
@@ -443,9 +444,17 @@ def create(
     insert_list: List[Tuple[str, int]] = []
     source_list: List[Tuple[str, str]] = []
     for (name, ll) in layers.items():
-        if 'operands' not in ll:
+        # There are two cases: element-wise operations ('operands' defined and > 1), and conv
+        # operations with multi-pass (> 64 input channels). In either case, in_sequences has
+        # more than one member.
+        if 'in_sequences' not in ll or len(ll['in_sequences']) < 2:
             continue
-        operands = ll['operands']
+        operands = ll['operands'] if 'operands' in ll else 1
+        if operands == 1:
+            if ll['proc_count'] <= 64:
+                continue
+            else:
+                operands = len(ll['in_sequences'])
         # For each input, check whether anybody else is using the input. If yes, insert a dummy
         # layer that creates a write_gap version of the data. If no, add the write_gap to the
         # producer.
