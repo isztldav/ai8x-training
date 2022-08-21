@@ -135,7 +135,7 @@ def create(
             return s[:separator]
         return s
 
-    def ignore_layer(name: str, layer: Dict[str, Any]) -> bool:
+    def ignore_layer(_name: str, layer: Dict[str, Any]) -> bool:
         """
         Remove these layers from the graph
         """
