@@ -35,7 +35,10 @@ def allocate_processors(
     """
     if hwc:
         # Inner layers are always HWC
-        count = min(count, 64)  # Multi-pass
+        if count > 64:  # Multi-pass processor count
+            divider = (count + 63) // 64
+            count = (count + divider - 1) // divider  # Rounded up
+        assert count <= 64
         return (1 << count) - 1
 
     assert count <= 16
@@ -475,8 +478,7 @@ def create(
         if operands == 1:
             if ll['proc_count'] <= 64:
                 continue
-            else:
-                operands = len(ll['in_sequences'])
+            operands = len(ll['in_sequences'])
         # For each input, check whether anybody else is using the input. If yes, insert a dummy
         # layer that creates a write_gap version of the data. If no, add the write_gap to the
         # producer.
@@ -522,11 +524,15 @@ def create(
             if s == source:
                 seq[i] = source + '_gap'
     # Insert additional layers
-    new_layer: Dict[str, Any] = {}
     for (name, gap) in insert_list:
+        new_layer: Dict[str, Any] = {}
         new_name = name + '_gap'
         new_layer['name'] = new_name
-        new_layer['proc_count'] = layers[name]['proc_count']  # Same processor count as original
+        processors = 0
+        for ie in inputs[new_name]:
+            if ie in shapes:
+                processors += shapes[ie][0]
+        new_layer['proc_count'] = processors
         new_layer['op'] = 'Passthrough'
         new_layer['name'] = name + '_gap'
         new_layer['write_gap'] = gap - 1
