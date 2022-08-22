@@ -124,6 +124,12 @@ def create(
         """
         Return the canonical name for this layer
         """
+        separator = s.rfind('_Div_1')
+        if separator > 0:
+            s = s[:separator]
+        separator = s.rfind('_MatMul_1')
+        if separator > 0:
+            s = s[:separator]
         separator = s.rfind('.')
         if separator > 0:
             suffix = s[separator + 1:]
@@ -131,9 +137,6 @@ def create(
                           'clamp', 'op', 'pool', 'scale') \
                or suffix.startswith('clamp_') or suffix.startswith('pool_'):
                 return s[:separator]
-        separator = s.rfind('_Div_1')
-        if separator > 0:
-            return s[:separator]
         return s
 
     def ignore_layer(_name: str, layer: Dict[str, Any]) -> bool:
@@ -144,7 +147,7 @@ def create(
             return True  # Not consuming or producing anything, useless layer
         return layer['type'] not in (
             'Add', 'Sub', 'Xor',  # element-wise
-            'Gemm',  # fc
+            'Gemm', 'MatMul',  # fc
             'Conv', 'ConvTranspose',
             'MaxPool', 'AveragePool',
             'Abs', 'Relu',
@@ -302,7 +305,7 @@ def create(
             operands = len(ins)
             this_layer['eltwise'] = op
             this_layer['operands'] = operands
-        elif op == 'Gemm':
+        elif op in ('Gemm', 'MatMul'):
             this_layer['op'] = main_op = 'Linear'
             this_layer['activate'] = 'None'
         elif op in ('Conv', 'ConvTranspose'):
@@ -758,7 +761,7 @@ def create(
             f'arch: {arch}\n'
             f'dataset: {dataset}\n'
             '\n'
-            'layers:\n'
+            'layers:'
         )
 
         prev_name = ''
