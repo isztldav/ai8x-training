@@ -317,7 +317,6 @@ def create(
             this_layer['activate'] = 'None'
             main_op = op
         elif op in ('MaxPool', 'AveragePool'):
-            this_layer['op'] = op
             shape = all_ops[name]['attrs']['kernel_shape']
             if len(shape) == 1 or shape[0] == shape[1]:
                 shape = shape[0]
@@ -509,7 +508,9 @@ def create(
     for count, (name, ll) in enumerate(layers.items()):
         if ll['main_op'] in ('Conv', 'Linear') and prev_name != '':
             prev = layers[prev_name]
-            if prev['op'] not in ('MaxPool', 'AveragePool'):
+            if prev['op'] is not 'Passthrough' or (
+                'max_pool' not in prev and 'avg_pool' not in prev
+            ):
                 continue
             # Check that no layer other than the activation layer uses the intermediate output of
             # the conv layer as an input
