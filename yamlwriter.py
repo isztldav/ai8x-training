@@ -13,10 +13,11 @@ TODO: Implement smart processor and data memory allocator (out_offset, in_offset
 TODO: Implement dilation
 TODO: Testing
 
-NOTE: This code somewhat depends on ai8x.py. Weight and bias parameters are expected to be called
+NOTE: This code partially depends on ai8x.py. Weight and bias parameters are expected to be called
 '.op.weight' and 'op.bias'. Quantization information is expected in '.weight_bits' and the output
 width is inferred from name + '.clamp'.
 """
+import os
 from typing import Any, Dict, List, Optional, OrderedDict, Tuple, Union
 
 import distiller
@@ -744,6 +745,9 @@ def create(
         ll['out_offset'] = out_offset
 
     # 9 - Print
+    target_dir = os.path.dirname(filename)
+    if target_dir != '':
+        os.makedirs(target_dir, exist_ok=True)
     with open(filename, mode='w', encoding='utf-8') as f:
         f.write(
             '---\n'

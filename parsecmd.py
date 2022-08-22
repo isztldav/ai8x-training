@@ -30,11 +30,7 @@ Command line parser for the Training/Quantization software.
 import argparse
 import os
 
-# pylint: disable=wrong-import-order
-import distiller
-import distiller.quantization
 from distiller.utils import float_range_argparse_checker as float_range
-from examples.auto_compression.amc import amc_args as adc
 
 from devices import device
 
@@ -150,7 +146,7 @@ def get_parser(model_names, dataset_names):
                         ' | '.join(SUMMARY_CHOICES))
     parser.add_argument('--summary-filename', default='model',
                         help='file name (w/o extension) for the model summary (default: "model"')
-    parser.add_argument('--yaml-template', action='store_true', default=False,
+    parser.add_argument('--yaml-template', type=str, default=None, metavar='PATH',
                         help='create a YAML template for the model')
 
     parser.add_argument('--compress', dest='compress', type=str, nargs='?', action='store',
@@ -248,8 +244,4 @@ def get_parser(model_names, dataset_names):
                                     help='path to YAML file that defines the '
                                     'parameters for Objetc Detection Loss and NMS')
 
-    distiller.knowledge_distillation.add_distillation_args(parser, model_names, True)
-    distiller.quantization.add_post_train_quant_args(parser)
-    distiller.pruning.greedy_filter_pruning.add_greedy_pruner_args(parser)
-    adc.add_automl_args(parser)
     return parser
