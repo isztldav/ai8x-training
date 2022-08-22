@@ -292,8 +292,7 @@ def create(
         if name != final_layer and any(x not in input_layer for x in outputs[name]):
             this_layer['output'] = 'true'
 
-        this_layer['op'] = 'Passthrough'
-        main_op = 'Passthrough'
+        this_layer['op'] = main_op = 'Passthrough'
         operands: int = 1
 
         op = all_ops[name]['type']
@@ -303,17 +302,11 @@ def create(
             this_layer['eltwise'] = op
             this_layer['operands'] = operands
         elif op == 'Gemm':
-            this_layer['op'] = 'Linear'
-            main_op = 'Linear'
+            this_layer['op'] = main_op = 'Linear'
             this_layer['activate'] = 'None'
-        elif op == 'Conv':
+        elif op in ('Conv', 'ConvTranspose'):
             kernel_size = all_ops[name]['attrs']['kernel_shape']
-            this_layer['op'] = f'Conv{len(kernel_size)}d'
-            this_layer['activate'] = 'None'
-            main_op = op
-        elif op == 'ConvTranspose':
-            kernel_size = all_ops[name]['attrs']['kernel_shape']
-            this_layer['op'] = f'ConvTranspose{len(kernel_size)}d'
+            this_layer['op'] = f'{op}{len(kernel_size)}d'
             this_layer['activate'] = 'None'
             main_op = op
         elif op in ('MaxPool', 'AveragePool'):
@@ -326,7 +319,6 @@ def create(
                 this_layer['avg_pool'] = shape
             this_layer['pool_stride'] = all_ops[name]['attrs']['strides'][0]
         elif op in ('Abs', 'Relu'):
-            this_layer['op'] = op
             this_layer['activate'] = op
         else:
             this_layer['op'] = f'Unknown ({op})'
@@ -453,9 +445,11 @@ def create(
 
     # 6a - Merge (fuse) conv and activation layers
     for count, (name, ll) in enumerate(layers.items()):
-        if ll['op'] in ('Abs', 'Relu') and prev_name != '':
+        if ll['main_op'] == 'Passthrough' and 'activate' in ll and prev_name != '':
             prev = layers[prev_name]
-            if prev['main_op'] not in ('Conv', 'Linear'):
+            if prev['main_op'] not in ('Conv', 'ConvTranspose', 'Linear'):
+                print(f'ERROR: Activation layer {name} does not follow '
+                      f'Conv/Linear layer {prev_name}!')
                 continue
             # Check that no layer other than the activation layer uses the intermediate output of
             # the conv layer as an input
@@ -466,6 +460,8 @@ def create(
                         veto = True
                         break
             if veto:
+                print(f'ERROR: Activation layer {name} has inputs that are not from a directly '
+                      f'preceding Conv/Linear layer {prev_name}!')
                 continue
             # Combine both layers
             if 'comment' not in prev:
@@ -506,9 +502,9 @@ def create(
     prev = {}
 
     for count, (name, ll) in enumerate(layers.items()):
-        if ll['main_op'] in ('Conv', 'Linear') and prev_name != '':
+        if ll['main_op'] in ('Conv', 'ConvTranspose', 'Linear') and prev_name != '':
             prev = layers[prev_name]
-            if prev['op'] is not 'Passthrough' or (
+            if prev['main_op'] != 'Passthrough' or (
                 'max_pool' not in prev and 'avg_pool' not in prev
             ):
                 continue
@@ -569,7 +565,7 @@ def create(
     prev_name = ''
     pop_list = []
     for count, (name, ll) in enumerate(layers.items()):
-        if ll['main_op'] == 'Conv' and prev_name != '':
+        if ll['main_op'] in ('Conv', 'ConvTranspose') and prev_name != '':
             prev = layers[prev_name]
             # Only one pooling operation possible
             pool_count: int = 0
@@ -723,7 +719,7 @@ def create(
             if ie in shapes:
                 processors += shapes[ie][0]
         new_layer['proc_count'] = processors
-        new_layer['op'] = 'Passthrough'
+        new_layer['op'] = new_layer['main_op'] = 'Passthrough'
         new_layer['name'] = 'gap_' + name
         new_layer['write_gap'] = gap - 1
 
