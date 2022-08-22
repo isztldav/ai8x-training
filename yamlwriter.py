@@ -15,6 +15,10 @@ TODO: Testing
 
 NOTE: This code partially depends on ai8x.py. Weight and bias parameters are expected to be called
 '.op.weight' and 'op.bias'. Quantization information is expected in '.weight_bits'.
+
+The element-wise bitwise Or/Xor operators are currently not supported in ONNX, and the export will
+therefore fail. This code has provisions for BitwiseOr/BitwiseXor, which may need to be modified
+once the official ONNX operators become available.
 """
 import os
 from typing import Any, Dict, List, Optional, OrderedDict, Tuple, Union
@@ -142,7 +146,7 @@ def create(
         if not layer['inputs'] or not layer['outputs']:
             return True  # Not consuming or producing anything, useless layer
         return layer['type'] not in convolution_ops and layer['type'] not in (
-            'Add', 'Sub', 'Xor',  # element-wise
+            'Add', 'Sub', 'BitwiseOr', 'BitwiseXor',  # element-wise
             'MaxPool', 'AveragePool',
             'Abs', 'Relu',
         )
@@ -315,8 +319,10 @@ def create(
 
         op = all_ops[name]['type']
 
-        if op in ('Add', 'Sub', 'Xor'):
+        if op in ('Add', 'Sub', 'BitwiseOr', 'BitwiseXor'):
             operands = len(ins)
+            if op.startswith('Bitwise'):
+                op = op[7:]
             this_layer['eltwise'] = op
             this_layer['operands'] = operands
         elif op in ('Gemm', 'MatMul'):
