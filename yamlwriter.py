@@ -13,15 +13,15 @@ TODO: Implement smart processor and data memory allocator (out_offset, in_offset
 TODO: Implement dilation
 TODO: Testing
 
-NOTE: This code partially depends on ai8x.py. Weight and bias parameters are expected to be called
-'.op.weight' and 'op.bias'. Quantization information is expected in '.weight_bits'.
+NOTE: This code partially depends on ai8x.py:
+      - Quantization information is expected in '.weight_bits'.
 
 The element-wise bitwise Or/Xor operators are currently not supported in ONNX, and the export will
 therefore fail. This code has provisions for BitwiseOr/BitwiseXor, which may need to be modified
 once the official ONNX operators become available.
 """
 import os
-from typing import Any, Dict, List, Optional, OrderedDict, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, OrderedDict, Tuple, Union
 
 import distiller
 
@@ -119,14 +119,16 @@ def create(
     for i, param in g.params.items():
         shape = param['shape']
         if len(shape) > 1:
-            shapes[i] = param['shape'][1:]  # Remove batch dimension
+            shapes[i] = shape[1:]  # Remove batch dimension
 
     all_ops: OrderedDict[str, Dict[str, Any]] = g.ops
 
     # ONNX operators for convolution:
     convolution_ops: Tuple[str, ...] = ('Conv', 'ConvTranspose', 'Gemm', 'MatMul')
 
-    def canonical_name(s: str) -> str:
+    def canonical_name(
+            s: str,
+    ) -> str:
         """
         Return the canonical name for this layer
         """
@@ -139,7 +141,10 @@ def create(
                 return s[:separator]
         return s
 
-    def ignore_layer(_name: str, layer: Dict[str, Any]) -> bool:
+    def ignore_layer(
+            _name: str,
+            layer: Dict[str, Any],
+    ) -> bool:
         """
         Remove unnecessary layers from the graph
         """
@@ -151,11 +156,43 @@ def create(
             'Abs', 'Relu',
         )
 
+    def follow_input(
+            trace_in: List[str],
+            condition: Callable[[str], bool],
+    ) -> List[str]:
+        """
+        Trace a list of inputs back upstream and stop when condition is met
+        """
+        results: List[str] = []
+        while len(trace_in) > 0:
+            next_trace: List[str] = []
+            for t in trace_in:
+                if condition(t):
+                    results.append(t)
+                else:
+                    for n in all_ops:
+                        if t in all_ops[n]['outputs']:
+                            next_trace += all_ops[n]['inputs']
+            trace_in = next_trace
+
+        return results
+
     # 1 - Set output_width to 32 where needed
     # Trace all "-32768" constants to the next 'Min' operation (there may be more than one)
     results: List[str] = []
 
     for n in all_ops:
+        if all_ops[n]['type'] in convolution_ops:
+            # Ignore weights/biases in the input list
+            # These operations have 2 or three arguments: data/weights/biases(optional)
+            all_ops[n]['weights'] = follow_input([all_ops[n]['inputs'][1]],
+                                                 lambda s: s in shapes)
+            if len(all_ops[n]['inputs']) == 3:
+                all_ops[n]['biases'] = follow_input([all_ops[n]['inputs'][2]],
+                                                    lambda s: s in shapes)
+            # Remove weights and biases from the inputs for this operation
+            all_ops[n]['inputs'] = [all_ops[n]['inputs'][0]]
+
         if all_ops[n]['type'] != 'Constant' or 'value' not in all_ops[n]['attrs'] \
            or all_ops[n]['attrs']['value'].dim() != 0 or all_ops[n]['attrs']['value'] != -32768:
             continue
@@ -282,13 +319,8 @@ def create(
         if name not in inputs:
             inputs[name] = []
         for ie in all_ops[name]['inputs']:
-            # Ignore weights and biases (uses hard-coded names from ai8x.py)
-            if ie.endswith('.output_shift'):
-                print('ALERT: found output_shift in input to layer', name)
-            if ie != '' and not ie.endswith('.op.bias') and not ie.endswith('.op.weight') \
-               and not ie.endswith('.output_shift'):
-                if ie not in output_layer or output_layer[ie] != name:
-                    inputs[name].append(ie)
+            if ie != '' and ie not in output_layer or output_layer[ie] != name:
+                inputs[name].append(ie)
 
         if name not in outputs:
             outputs[name] = []
@@ -304,7 +336,7 @@ def create(
     for name in all_ops:
         if ignore_layer(name, all_ops[name]):
             continue
-        canonical = canonical_name(name)
+
         this_layer: Dict[str, Any] = {}
 
         this_layer['name'] = name
@@ -349,7 +381,7 @@ def create(
 
         this_layer['main_op'] = main_op
 
-        if main_op in ('Conv', 'ConvTranspose'):
+        if op in ('Conv', 'ConvTranspose'):
             if len(kernel_size) == 1:
                 this_layer['kernel_size'] = str(kernel_size[0])
             else:
@@ -361,32 +393,27 @@ def create(
                 this_layer['groups'] = groups
 
             # Quantization uses hard-coded name from ai8x.py
+            quantization = 8
             try:
-                quantization = int(model.get_parameter(canonical + '.weight_bits'))
-                if quantization == 0:
-                    quantization = 8
+                quantization = int(model.get_parameter(name + '.weight_bits'))
             except AttributeError:
-                quantization = 8
-            if quantization != 8:
-                assert quantization in [1, 2, 4], f'{name}: quantization={quantization}'
+                try:
+                    quantization = int(model.get_parameter(canonical_name(name) + '.weight_bits'))
+                except AttributeError:
+                    pass
+            if quantization not in (0, 8):
+                assert quantization in (1, 2, 4), f'ERROR: {name}: quantization={quantization}'
                 this_layer['quantization'] = quantization
 
-        # Use the hard-coded bias name from ai8x.py to record whether a bias is used in the
-        # convolution.
-        if main_op in ('Conv', 'ConvTranspose', 'Linear'):
+        # Check for biases and 32-bit output using the data recorded earlier
+        if op in convolution_ops:
             if 'wide' in all_ops[name] and all_ops[name]['wide']:
                 this_layer['output_width'] = 32
-
-            have_bias: bool = False
-            for e in all_ops[name]['inputs']:
-                if e.endswith('.op.bias'):
-                    have_bias = True
-                    break
-            this_layer['have_bias'] = have_bias
+            this_layer['have_bias'] = 'biases' in all_ops[name]
 
         # Check whether inputs need to be flattened (when they are not in 1x1 dimensions)
         flatten: bool = False
-        if main_op == 'Linear':
+        if op in ('Gemm', 'MatMul'):
             for ie in inputs[name]:
                 if ie in shapes:
                     mult: int = 1
@@ -724,15 +751,12 @@ def create(
     out_offset = 0  # Start at 0 (default input offset)
 
     for (name, ll) in layers.items():
-        processors = ll['proc_count']
         hwc = ll['data_format'] if 'data_format' in ll else True
-        if processors == 0:
-            ll['processors'] = 0  # Unknown
-        else:
-            processors = allocate_processors(name, processors, hwc=hwc)
-            ll['processors'] = processors
+        processors = ll['proc_count']
+        processor_map = 0 if processors == 0 else allocate_processors(name, processors, hwc=hwc)
+        ll['processors'] = processor_map
 
-        out_offset = allocate_offset(name, processors, out_offset)
+        out_offset = allocate_offset(name, processor_map, out_offset)
         ll['out_offset'] = out_offset
 
     # 10 - Print
