@@ -52,6 +52,8 @@ def create(
         dataset: str,
         arch: str,
         hwc: bool = False,
+        use_fifos: bool = False,
+        move_l0: bool = False,
         filename: str = 'template.yaml',
         qat_policy: Optional[str] = None,
         verbose=True,
@@ -300,6 +302,7 @@ def create(
     prev_op_name: str = ''
     layers: Dict[str, Dict[str, Any]] = {}
     input_hwc: bool = False
+    input_processors: int = 0
 
     for name in all_ops:
         if ignore_layer(name, all_ops[name]):
@@ -431,8 +434,8 @@ def create(
         for ie in inputs[name]:
             if ie in shapes:
                 processors += shapes[ie][0]
-                if operands == 1:
-                    break  # Element-wise: data is interleaved, not concatenated
+        if operands > 1:  # Element-wise: data is always interleaved
+            processors //= operands
         this_layer['proc_count'] = processors
 
         # Inner layers and more than 16 channels are always HWC
@@ -442,11 +445,10 @@ def create(
             # Show input dimensions and data format for input layers
             this_layer['data_format'] = hwc
             input_hwc = hwc
+            input_processors = this_layer['proc_count']
         else:
             # Don't set in_sequences when using strictly sequential single inputs
-            # print('in_sequences candidates for', name, ins, end='')
             ins = [output_layer[x] for x in ins]
-            # print(' translated to layers:', ins)
             if len(ins) > 1 or (len(ins) > 0 and ins[0] != prev_op_name):
                 if operands > 1:
                     ins.reverse()  # Reverse the list since PyTorch does it backwards
@@ -454,6 +456,9 @@ def create(
 
         prev_op_name = name
         layers[name] = this_layer
+
+    del input_layer
+    del output_layer
 
     prev_name: str = ''
     pop_list: List[Tuple[str, str]] = []
@@ -467,6 +472,7 @@ def create(
             if prev['main_op'] not in ('Conv', 'ConvTranspose', 'Linear'):
                 print(f'ERROR: Activation layer {name} does not follow '
                       f'Conv/Linear layer {prev_name}!')
+                prev_name = name
                 continue
             # Check that no layer other than the activation layer uses the intermediate output of
             # the conv layer as an input
@@ -479,6 +485,7 @@ def create(
             if veto:
                 print(f'ERROR: Activation layer {name} has inputs that are not from a directly '
                       f'preceding Conv/Linear layer {prev_name}!')
+                prev_name = name
                 continue
             # Combine both layers
             if 'comment' not in prev:
@@ -524,6 +531,7 @@ def create(
             if prev['main_op'] != 'Passthrough' or (
                 'max_pool' not in prev and 'avg_pool' not in prev
             ):
+                prev_name = name
                 continue
             # Check that no layer other than the activation layer uses the intermediate output of
             # the conv layer as an input
@@ -534,6 +542,7 @@ def create(
                         veto = True
                         break
             if veto:
+                prev_name = name
                 continue
             # Combine both layers
             if 'comment' not in ll:
@@ -587,15 +596,16 @@ def create(
                     if prev_name in ol['in_sequences']:
                         veto = True
                         break
-            if veto:
-                continue
-            if 'in_sequences' in ll or 'in_dim' in ll or 'flatten' in ll:
+            if veto or 'in_sequences' in ll or 'in_dim' in ll or 'flatten' in ll:
+                prev_name = name
                 continue
             if prev['main_op'] != 'Passthrough' or 'operands' not in prev \
                or prev['operands'] == 1 or pool_count > 1:
+                prev_name = name
                 continue
             # MAX78002 - avoid element-wise with bias and convolution when using multi-pass
             if ai8x.dev.device == 87 and ll['have_bias'] and prev['proc_count'] > 64:
+                prev_name = name
                 continue
             # Combine both layers
             if 'comment' not in ll:
@@ -636,41 +646,37 @@ def create(
     insert_list: List[Tuple[str, int]] = []
     source_list: List[Tuple[str, str]] = []
 
+    prev_name = ''
     for (name, ll) in layers.items():
-        # There are two cases: element-wise operations ('operands' defined and > 1), and conv
-        # operations with multi-pass (> 64 input channels). In either case, in_sequences has
-        # more than one member.
-        # print('*', name, ll['in_sequences'] if 'in_sequences' in ll else '--')
-        if 'in_sequences' not in ll or len(ll['in_sequences']) < 2:
-            continue
-        operands = ll['operands'] if 'operands' in ll else 1
-        # print('still here, have', operands, 'operands', 'and a proc_count of', ll['proc_count'])
-        if operands == 1:
-            operands = len(ll['in_sequences'])
-            # Concat instead of interleave for small channel counts
-            if ll['proc_count'] * operands <= 64:
-                ll['proc_count'] *= operands
+        if 'in_sequences' not in ll:
+            if prev_name == '':
+                prev_name = name
                 continue
-        # print('checking in_sequences for layer', name, ll['in_sequences'], 'with', operands,
-        #       'operands')
+            sources: List[str] = [prev_name]
+        else:
+            sources = ll['in_sequences']
+        operands = ll['operands'] if 'operands' in ll else len(sources)
+        if operands < 2:
+            prev_name = name
+            continue
+
         # For each input, check whether anybody else is using the input. If yes, insert a dummy
         # layer that creates a write_gap version of the data. If no, add the write_gap to the
         # producer.
-        for source in ll['in_sequences']:
+        for source in sources:
             must_insert: bool = False
-            prev_name = ''
+            prev_name_inner = ''
             for (other_name, ol) in layers.items():
                 if other_name not in (name, source):
                     if 'in_sequences' in ol:
                         for e in ol['in_sequences']:
                             if e == source:
                                 must_insert = True
-                    elif prev_name == source:
+                    elif prev_name_inner == source:
                         must_insert = True
                         # Break the sequence
                         ol['in_sequences'] = [source]
-                prev_name = other_name
-            # print('must_insert for', source, 'is', must_insert)
+                prev_name_inner = other_name
             if not must_insert:
                 # The source is used only by the element-wise layer, so we can insert the write gap
                 # directly
@@ -689,9 +695,11 @@ def create(
                         shapes[name + '_data'] = shapes[ie]
                         shapes[source + '_data'] = shapes[ie]
 
+        prev_name = name
+
     # Insert simple write gaps
-    for (name, gap) in write_gap_list:
-        layers[name]['write_gap'] = gap - 1
+    for (name, operands) in write_gap_list:
+        layers[name]['write_gap'] = operands - 1
     # Break sequence
     for (name, source) in source_list:
         seq = layers[name]['in_sequences']
@@ -699,7 +707,7 @@ def create(
             if s == source:
                 seq[i] = 'gap_' + source
     # Insert additional layers
-    for (name, gap) in insert_list:
+    for (name, operands) in insert_list:
         new_layer: Dict[str, Any] = {}
         new_name = 'gap_' + name
         new_layer['name'] = new_name
@@ -709,7 +717,7 @@ def create(
                 processors += shapes[ie][0]
         new_layer['proc_count'] = processors
         new_layer['op'] = new_layer['main_op'] = 'Passthrough'
-        new_layer['write_gap'] = gap - 1
+        new_layer['write_gap'] = operands - 1
 
         # Insert into dict via list
         insert_pos: int = list(layers.keys()).index(name) + 1
@@ -718,6 +726,69 @@ def create(
         layers = dict(layers_list)
 
     # 9 - Record actual used processors for all layers and weight cost for all conv layers
+    # Add all_inputs (either in_sequence or the previous layer's name if not defined)
+    all_inputs: Dict[str, List[str]] = {}  # Input LAYERS to the key layer (vs. shapes in inputs)
+    all_outputs: Dict[str, List[str]] = {}  # Output LAUYERS to th key layer (vs. shapes)
+
+    prev_name = ''
+    for (name, ll) in layers.items():
+        val: Optional[List[str]] = None
+        if 'in_sequences' not in ll:
+            val = [prev_name] if prev_name != '' else None
+        else:
+            val = ll['in_sequences']
+        if val is not None:
+            all_inputs[name] = val
+            for ie in val:
+                if ie in all_outputs:
+                    all_outputs[ie].append(name)
+                else:
+                    all_outputs[ie] = [name]
+        prev_name = name
+
+        # There are two cases: element-wise operations ('operands' defined and > 1), and conv
+        # operations with multi-pass (> 64 input channels). In either case, in_sequences has
+        # more than one member.
+        if 'in_sequences' not in ll or len(ll['in_sequences']) < 2:
+            continue
+        operands = ll['operands'] if 'operands' in ll else 1
+        if operands == 1:
+            operands = len(ll['in_sequences'])
+            # Concat instead of interleave for small channel counts
+            if ll['proc_count'] <= 64:
+                ll['concat'] = True
+                for i, ie in enumerate(ll['in_sequences']):
+                    lin = layers[ie]
+                    lin['concat_source'] = max(i, lin['concat_source']) \
+                        if 'concat_source' in lin else i
+            else:
+                # Interleave the inputs in the channels
+                ll['proc_count'] //= operands
+
+    # Mark the size of all concat outputs
+    for (name, ll) in layers.items():
+        if 'concat_source' not in ll:
+            continue
+
+        if name not in outputs or len(outputs[name]) != 1 or outputs[name][0] not in shapes:
+            print('ERROR: Cannot derive output shape(s) for layer', name)
+        oshape = shapes[outputs[name][0]]
+        ll['concat_shape'] = oshape[0]
+
+    def calculate_processors(processors: int) -> int:
+        """
+        Given a channel count, return the multi-pass adjusted processor count
+        """
+        if processors > 64:  # Multi-pass processor count
+            divider: int = (processors + 63) // 64
+            processors = (processors + divider - 1) // divider  # Rounded up
+            remainder: int = processors % 4
+            if remainder != 0:
+                remainder = 4 - remainder
+            processors += remainder  # To next multiple of 4
+        return processors
+
+    # cost_list: processors/weights per layer for Conv layers with 60 or fewer processors
     cost_list: List[Tuple[int, int, str]] = []
 
     for (name, ll) in layers.items():
@@ -725,13 +796,7 @@ def create(
         processors = ll['proc_count']
         # Calculate the final number of used processors
         if hwc:
-            if processors > 64:  # Multi-pass processor count
-                divider: int = (processors + 63) // 64
-                processors = (processors + divider - 1) // divider  # Rounded up
-                remainder: int = processors % 4
-                if remainder != 0:
-                    remainder = 4 - remainder
-                processors += remainder  # To next multiple of 4
+            processors = calculate_processors(processors)
             assert processors <= 64
         else:
             assert processors <= 16
@@ -745,88 +810,294 @@ def create(
                 weights_per_processor //= 8 // ll['quantization']
         ll['weight_cost'] = weights_per_processor
 
-        cost_list.append((weights_per_processor, processors, name))
+        if processors <= 60:
+            # Only add to this list if we're using less than the full processor count
+            # (for 64 processors, there are no options and hence no optimizations)
+            cost_list.append((weights_per_processor, processors, name))
+        else:
+            # Append even those layers that use 64 processors, because they may be 'concat' layer
+            # or it may be a layer 0 and therefore, the source may need to be arranged properly.
+            # But use zero cost to get them to move to the end (or ignored in the cost
+            # calculation).
+            cost_list.append((0, processors, name))
 
-    # 10 - TODO: Assign processors and output_offset
+    # print('\nFINAL cost_list', cost_list, '\n\n')
+
+    # Layer 0 is not the output of anything, so add it in from the beginning
+    bucket_groups: List[List[Tuple[int, int, str]]] = [[cost_list[0]]]
+    bucket: Dict[str, int] = {}
+    bucket[cost_list[0][2]] = 0
+
+    # Find layers where the output is used as input of more than one layer. Those layers then
+    # must use the same processors. This is achieved by "combining the rectangles".
+    for (name, ll) in layers.items():
+        if name not in all_outputs:
+            continue  # This shouldn't ever happen except for the final layer
+
+        # print(name, 'grouping everything in', all_outputs[name])
+        # XXX What is the output shape of this layer? May need the processor_count
+        merge_buckets: List[int] = []
+        for i, (_, _, n) in enumerate(cost_list):
+            if n in all_outputs[name]:
+                if n in bucket:  # We already have a bucket that contains n.
+                    # Merge the bucket contents
+                    merge_buckets.append(bucket[n])
+                else:
+                    # Create a new empty bucket and add the layer to it. Also add the new bucket
+                    # to the merge list.
+                    bucket_number = len(bucket_groups)
+                    bucket[n] = bucket_number
+                    merge_buckets.append(bucket_number)
+                    bucket_groups.append([cost_list[i]])
+        if len(merge_buckets) > 1:
+            target: int = merge_buckets[0]
+            for i in merge_buckets[1:]:
+                bucket_groups[target] += bucket_groups[i]
+                bucket_groups[i] = []  # Rather than deleting, we just set invalid values
+
+    # For the remaining buckets, combine the weights, check the processors, and make a layer list
+    # print('FINAL bucket_groups', bucket_groups)
+
+    del cost_list  # No longer needed
+
+    # Same as cost_list, but now with multiple entries
+    group_list: List[Tuple[int, int, int, int, List[Tuple[int, int, str]]]] = []
+
+    for b in bucket_groups:
+        if not b:
+            continue
+        # print('============ bucket group', b)
+        group_weights: int = 0
+        group_procs: int = -1
+        group_item: List[Tuple[int, int, str]] = []
+        min_shift = 0
+        last_processor = 63
+        for (weights_per_processor, processors, name) in b:
+            # print('examining - weights', weights_per_processor, 'procs', processors, 'name',
+            #       name, 'concat', 'YES' if 'concat' in layers[name] else 'NO')
+            group_weights += weights_per_processor  # Add weights
+            # print('processors', processors, 'vs', group_procs)
+            if 'concat' in layers[name]:  # For concatenation, we need partials
+                assert group_procs < 0 or group_procs == processors \
+                    or group_procs == processors // len(all_inputs[name])
+                # TODO: a straight divide may not be correct
+                # TODO: If there's a concat target, make sure to leave the extra space
+                # print('Found a concat, should set min_shift')
+                # min_shift = max(min_shift, processors // len(all_inputs[name]))
+            else:
+                # print(layers[name])
+                assert group_procs < 0 or group_procs == processors
+            group_procs = max(processors, group_procs)
+            group_item.append((weights_per_processor, processors, name))
+        if group_procs >= 0:
+            group_list.append((group_weights, group_procs,
+                               min_shift, last_processor, group_item))
+
+    # print('group_list', group_list, '\n')
+
+    # 10 - Assign processors
+    # TODO: Real algorithm for output_offset
     weights_used: List[int] = [0] * 64
 
     def allocate_processors(
-            _layer_name: str,
-            count: int,
             weight_cost: int,
+            count: int,
+            min_shift: int,
+            data: List[Tuple[int, int, str]],
             hwc: bool = True,
-    ) -> int:
+    ) -> Tuple[List[int], int]:
         """
         Allocate a given count of processors and return the bit map.
         TODO: This function should be expanded to evenly distribute resources, not only based on
         weights but also data memory utilization.
-        Additionally, the weight allocator should instead use a box packing algorithm.
+        Additionally, the weight allocator could instead use a box packing algorithm, but the
+        expected improvements are modest.
         """
-        if hwc:
-            # Pick "count" processors starting from 0
-            processor_map: int = (1 << count) - 1
-        else:
-            # Pick the first for every quadrant (FIFO compatible) or one every 4
-            mult = 16 if count <= 4 else 4
-            processor_map = 0
-            for i in range(count):
-                processor_map |= 1 << mult * i
+        min_cost: Tuple[int, int] = (2**63-1, -1)
+        shifted_map: List[int] = [0] * len(data)
+        processor_map: List[int] = shifted_map
+
+        # Move processor map left if needed to achieve the lowest combined 'weights_used'
+        for shift in range(min_shift, 64 - count + 1, 4):
+            for d, (item_cost, item_procs, _) in enumerate(data):
+                if hwc:
+                    # Pick "count" processors starting from 0
+                    shifted_map[d] = ((1 << item_procs) - 1) << shift
+                else:
+                    # Pick the first for every quadrant (FIFO compatible) or one every 4
+                    mult = 16 if count <= 4 else 4
+                    shifted_map[d] = 0
+                    for i in range(item_procs):
+                        shifted_map[d] |= 1 << mult * i
+                    shifted_map[d] <<= shift
+
+            if weight_cost == 0:
+                min_cost = (0, min_shift)
+                break
+            else:
+                cost: List[int] = weights_used.copy()
+
+                for p in range(64):
+                    for d, (item_cost, item_procs, _) in enumerate(data):
+                        if shifted_map[d] & (1 << p):
+                            cost[p] += item_cost
+
+                max_cost = max(cost)  # High water mark
+
+                if max_cost < min_cost[0]:  # Better option?
+                    min_cost = (max_cost, shift)
+                    processor_map = shifted_map.copy()
 
         if weight_cost > 0:
-            # Move processor map left if needed to achieve the lowest combined 'weights_used'
-            min_cost: Tuple[int, int] = (2**63-1, -1)
-            if count <= 60:
-                for shift in range(0, 64 - count + 1, 4):
-                    shifted_map: int = processor_map << shift
-                    cost: int = 0
-                    for p in range(64):
-                        if shifted_map & (1 << p):
-                            cost = max(cost, weights_used[p])
-                    if cost < min_cost[0]:  # Better option?
-                        min_cost = (cost, shift)
-                processor_map <<= min_cost[1]  # Final adjustment
-            else:
-                cost = 0
-                for p in range(64):
-                    if processor_map & (1 << p):
-                        cost = max(cost, weights_used[p])
-                min_cost = (cost, 0)
-
+            # Accounting based on the result
             for p in range(64):
-                if processor_map & (1 << p):
-                    weights_used[p] = min_cost[0] + weight_cost
+                proc_used: bool = False
+                for d, _ in enumerate(data):
+                    if processor_map[d] & (1 << p):
+                        proc_used = True
+                if proc_used:
+                    weights_used[p] = min_cost[0]
 
-        return processor_map
+        return processor_map, min_cost[1]
 
-    # TODO: We leave layer 0 alone and don't move processors. This is technically only needed when
-    # CHW is used, or FIFOs (and even then, there may be a few shift options).
-    l0: Tuple[int, int, str] = cost_list[0]
-    del cost_list[0]  # Remove layer 0 for sorting
-    cost_list.sort(reverse=True)  # Sort by weight depth, then processor count
-    cost_list.insert(0, l0)  # Put layer 0 back at the start
+    # When using CHW inputs with more than 1 processor, or we use fifos, we leave layer 0 alone
+    # and don't move processors. Technically, there would be a few more options for these layers
+    # but they are not considered since the potential gain is minimal.
+    l0: Optional[Tuple[int, int, int, int, List[Tuple[int, int, str]]]] = None
+    if not move_l0 or not input_hwc or input_processors != 1 or use_fifos:
+        l0 = group_list[0]
+        del group_list[0]
 
-    # Allocate remaining processors in order of weight cost
-    for (_, _, name) in cost_list:
-        ll = layers[name]
-        processor_map = 0 if ll['proc_count'] == 0 else \
+    # Sort by height and then width for the row allocator
+    group_list.sort(reverse=True)  # Sort by weight depth, then processor count
+    if l0 is not None:
+        group_list.insert(0, l0)  # Put layer 0 back at the start
+
+    # print('SORTED FINAL group_list', group_list, '\n\n')
+
+    # Allocate and record processors for the conv layers, and follow back to the producing layers
+    # and record the 'output_processors'.
+    for (weights_per_processor, processors, min_shift, _stop, data) in group_list:
+        # print('\n', weights_per_processor, processors, min_shift, _stop, data)
+
+        # Grab the first item. This should be the input layer for the very first item in the list.
+        ll = layers[data[0][2]]
+        assert processors > 0
+        hwc = ll['data_format'] if 'data_format' in ll else True
+
+        processor_map, _ = \
             allocate_processors(
-                name,
-                ll['proc_used'],
-                ll['weight_cost'],
-                hwc=ll['data_format'] if 'data_format' in ll else True,
+                weights_per_processor,
+                processors,
+                min_shift,
+                data,
+                hwc=hwc,
             )
-        ll['processors'] = processor_map
 
-    # TODO: Set out_offset properly
+        # print(data)
+
+        # When an output is used as an input to both a regular layer and a concatenation
+        intersected_map: int = 0xffffffffffffffff
+        for i, (_, _, name) in enumerate(data):
+            # print(name, f'0x{processor_map[i]:016x}')
+            layers[name]['processors'] = processor_map[i]
+            intersected_map &= processor_map[i]
+            # print(f'processor_map[{i}] 0x{processor_map[i]:016x}')
+
+        # print(f'intersected_map 0x{intersected_map:016x}')
+        # Number of 1-bits in the processor map, used for shifting concatenated inputs
+        shift_count: int = 0
+        while intersected_map & 1 == 0:
+            shift_count += 1
+            intersected_map >>= 1
+
+        for i, (_, _, name) in enumerate(data):
+            ll = layers[name]
+
+            if name not in all_inputs:
+                continue
+
+            if 'concat' not in ll:
+                # Interleaved (write_gap) outputs must share the same output processors.
+                for seq in all_inputs[name]:
+                    layers[seq]['output_processors'] = processor_map[i]
+            else:
+                # Concatenation: Create partial maps
+                shift: int = shift_count
+                for seq in all_inputs[name]:
+                    # print('layer', seq, 'concat_shape', layers[seq]['concat_shape'],
+                    #       'concat_source', layers[seq]['concat_source'], end='')
+                    item_procs: int = layers[seq]['concat_shape']
+                    layers[seq]['output_processors'] = ((1 << item_procs) - 1) << shift
+                    # print(f' map 0x{layers[seq]["output_processors"]:016x}, item_procs',
+                    #       item_procs)
+                    if item_procs % 4 != 0:
+                        item_procs += 4 - item_procs % 4
+                    shift += item_procs
+
+    # Add 'processors' to the remaining layers
+    for (name, ll) in layers.items():
+        if 'processors' in ll:
+            continue
+        assert name == ''
+        if ll['proc_count'] > 60:  # Shortcut when using all processors
+            ll['processors'] = (1 << ll['proc_count']) - 1
+            continue
+        # First priority: Match the output processors of the producing layers
+        if name in all_inputs and 'output_processors' in ll[all_inputs[name][0]]:
+            if 'concat' in ll:
+                # Create the union of all output_processors
+                # TODO: Fill in any inner 0-bits.
+                # print(f'XXX UNION XXX, existing processor_map {processor_map:016x}')
+                union_map = 0
+                for ie in all_inputs[name]:
+                    assert 'output_processors' in layers[ie]
+                    union_map |= layers[ie]['output_processors']
+                ll['processors'] = union_map
+            else:
+                ll['processors'] = ll['output_processors'][ll[all_inputs[name][0]]]
+        elif 'output_processors' in ll and ll['main_op'] == 'Passthrough':
+            ll['processors'] = ll['output_processors']
+        else:
+            ll['processors'] = (1 << ll['proc_count']) - 1
+        # print('Setting', name, f'processors to {ll["processors"]:016x}')
+
+    # 11 - Set output_offset. TODO: Use real algorithm
     out_offset: int = 0  # Start at 0 (default input offset)
 
     for (name, ll) in layers.items():
         out_offset = allocate_offset(name, ll['processors'], out_offset)
         ll['out_offset'] = out_offset
 
-    # 11 - TODO: Set output_processors for non-sequential layers
+    # 12 - Sanity check
+    for (name, ll) in layers.items():
+        if name not in all_inputs:
+            continue
+        if 'concat' in ll:
+            processor_union: int = 0
+            for ie in all_inputs[name]:
+                processor_union |= layers[ie]['output_processors']
+            if ll['processors'] != processor_union:
+                print(f'ERROR: Layer {name} processors 0x{ll["processors"]:016x} does not match '
+                      f'the contributing output_processors union 0x{processor_union:016x} of '
+                      f'the inputs {all_inputs[name]}')
+        else:
+            for ie in all_inputs[name]:
+                if ll['processors'] != layers[ie]['output_processors']:
+                    print(f'ERROR: Layer {name} processors 0x{ll["processors"]:016x} does not '
+                          f'match the output_processors 0x{layers[ie]["output_processors"]} of '
+                          f'the input {ie}')
 
-    # 12 - Print
+    # 13 - Clean up unneccessary output_processors
+    prev_name = ''
+    for (name, ll) in layers.items():
+        if prev_name != '':
+            prev = layers[prev_name]
+            if 'output_processors' in prev and prev['output_processors'] == ll['processors']:
+                del prev['output_processors']
+        prev_name = name
+
+    # 14 - Print
     target_dir: str = os.path.dirname(filename)
     if target_dir != '':
         os.makedirs(target_dir, exist_ok=True)
@@ -929,6 +1200,12 @@ def create(
                 f.write(f"    pool_stride: {ll['pool_stride']}\n")
             if 'write_gap' in ll:
                 f.write(f"    write_gap: {ll['write_gap']}\n")
+            if 'output_processors' in ll:
+                processors = ll['output_processors']
+                if processors == 0:
+                    f.write('    output_processors: unknown\n')
+                else:
+                    f.write(f'    output_processors: 0x{processors:016x}\n')
 
             # Show output dimensions for all output layers
             if name == final_layer or show_output:
