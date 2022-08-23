@@ -29,39 +29,6 @@ import ai8x
 import devices
 
 
-def allocate_processors(
-        _layer_name: str,
-        count: int,
-        hwc: bool = False,
-) -> int:
-    """
-    Allocate a given count of processors and return the bit map.
-    TODO: This function should be expanded to evenly distribute resources, based on weight and
-    data memory utilization.
-    """
-    if hwc:
-        # Inner layers are always HWC
-        if count > 64:  # Multi-pass processor count
-            divider = (count + 63) // 64
-            count = (count + divider - 1) // divider  # Rounded up
-            remainder = count % 4
-            if remainder != 0:
-                remainder = 4 - remainder
-            count += remainder  # To next multiple of 4
-        assert count <= 64
-
-        # Pick "count" processors starting from 0
-        return (1 << count) - 1
-
-    assert count <= 16
-    # Pick the first for every quadrant (FIFO compatible) or one every 4
-    mult = 16 if count <= 4 else 4
-    val: int = 0
-    for i in range(count):
-        val |= 1 << mult * i
-    return val
-
-
 def allocate_offset(
         _layer_name: str,
         _processor_map: int,
@@ -112,7 +79,7 @@ def create(
     dummy_input = distiller.get_dummy_input(dataset=None,
                                             device=distiller.model_device(model),
                                             input_shape=None)
-    g = distiller.SummaryGraph(model, dummy_input)
+    g = distiller.SummaryGraph(model, dummy_input, True, '#')
 
     # Get the input/output dimensions
     shapes: Dict[str, Tuple] = {}
@@ -159,6 +126,7 @@ def create(
     def follow_input(
             trace_in: List[str],
             condition: Callable[[str], bool],
+            replace: Tuple[str, str],
     ) -> List[str]:
         """
         Trace a list of inputs back upstream and stop when condition is met
@@ -168,7 +136,7 @@ def create(
             next_trace: List[str] = []
             for t in trace_in:
                 if condition(t):
-                    results.append(t)
+                    results.append(t.replace(replace[0], replace[1]))
                 else:
                     for n in all_ops:
                         if t in all_ops[n]['outputs']:
@@ -186,10 +154,10 @@ def create(
             # Ignore weights/biases in the input list
             # These operations have 2 or three arguments: data/weights/biases(optional)
             all_ops[n]['weights'] = follow_input([all_ops[n]['inputs'][1]],
-                                                 lambda s: s in shapes)
+                                                 lambda s: s in shapes, ('#', '.'))
             if len(all_ops[n]['inputs']) == 3:
                 all_ops[n]['biases'] = follow_input([all_ops[n]['inputs'][2]],
-                                                    lambda s: s in shapes)
+                                                    lambda s: s in shapes, ('#', '.'))
             # Remove weights and biases from the inputs for this operation
             all_ops[n]['inputs'] = [all_ops[n]['inputs'][0]]
 
@@ -410,6 +378,8 @@ def create(
             if 'wide' in all_ops[name] and all_ops[name]['wide']:
                 this_layer['output_width'] = 32
             this_layer['have_bias'] = 'biases' in all_ops[name]
+            this_layer['weight_count'] = \
+                sum(model.get_parameter(w).numel() for w in all_ops[name]['weights'])
 
         # Check whether inputs need to be flattened (when they are not in 1x1 dimensions)
         flatten: bool = False
@@ -747,20 +717,117 @@ def create(
         layers_list.insert(insert_pos, (new_name, new_layer))
         layers = dict(layers_list)
 
-    # 9 - TODO: Assign processors and output_offset
-    out_offset = 0  # Start at 0 (default input offset)
+    # 9 - Record actual used processors for all layers and weight cost for all conv layers
+    cost_list: List[Tuple[int, int, str]] = []
 
     for (name, ll) in layers.items():
         hwc = ll['data_format'] if 'data_format' in ll else True
         processors = ll['proc_count']
-        processor_map = 0 if processors == 0 else allocate_processors(name, processors, hwc=hwc)
+        # Calculate the final number of used processors
+        if hwc:
+            if processors > 64:  # Multi-pass processor count
+                divider: int = (processors + 63) // 64
+                processors = (processors + divider - 1) // divider  # Rounded up
+                remainder: int = processors % 4
+                if remainder != 0:
+                    remainder = 4 - remainder
+                processors += remainder  # To next multiple of 4
+            assert processors <= 64
+        else:
+            assert processors <= 16
+        ll['proc_used'] = processors
+
+        weights_per_processor: int = 0
+        if ll['main_op'] in ('Conv', 'ConvTranspose', 'Linear'):
+            # Account for kernel size for convolution operations
+            weights_per_processor = ll['weight_count'] // processors
+            if 'quantization' in ll:
+                weights_per_processor //= 8 // ll['quantization']
+        ll['weight_cost'] = weights_per_processor
+
+        cost_list.append((weights_per_processor, processors, name))
+
+    # 10 - TODO: Assign processors and output_offset
+    weights_used: List[int] = [0] * 64
+
+    def allocate_processors(
+            _layer_name: str,
+            count: int,
+            weight_cost: int,
+            hwc: bool = True,
+    ) -> int:
+        """
+        Allocate a given count of processors and return the bit map.
+        TODO: This function should be expanded to evenly distribute resources, not only based on
+        weights but also data memory utilization.
+        Additionally, the weight allocator should instead use a box packing algorithm.
+        """
+        if hwc:
+            # Pick "count" processors starting from 0
+            processor_map: int = (1 << count) - 1
+        else:
+            # Pick the first for every quadrant (FIFO compatible) or one every 4
+            mult = 16 if count <= 4 else 4
+            processor_map = 0
+            for i in range(count):
+                processor_map |= 1 << mult * i
+
+        if weight_cost > 0:
+            # Move processor map left if needed to achieve the lowest combined 'weights_used'
+            min_cost: Tuple[int, int] = (2**63-1, -1)
+            if count <= 60:
+                for shift in range(0, 64 - count + 1, 4):
+                    shifted_map: int = processor_map << shift
+                    cost: int = 0
+                    for p in range(64):
+                        if shifted_map & (1 << p):
+                            cost = max(cost, weights_used[p])
+                    if cost < min_cost[0]:  # Better option?
+                        min_cost = (cost, shift)
+                processor_map <<= min_cost[1]  # Final adjustment
+            else:
+                cost = 0
+                for p in range(64):
+                    if processor_map & (1 << p):
+                        cost = max(cost, weights_used[p])
+                min_cost = (cost, 0)
+
+            for p in range(64):
+                if processor_map & (1 << p):
+                    weights_used[p] = min_cost[0] + weight_cost
+
+        return processor_map
+
+    # TODO: We leave layer 0 alone and don't move processors. This is technically only needed when
+    # CHW is used, or FIFOs (and even then, there may be a few shift options).
+    l0: Tuple[int, int, str] = cost_list[0]
+    del cost_list[0]  # Remove layer 0 for sorting
+    cost_list.sort(reverse=True)  # Sort by weight depth, then processor count
+    cost_list.insert(0, l0)  # Put layer 0 back at the start
+
+    # Allocate remaining processors in order of weight cost
+    for (_, _, name) in cost_list:
+        ll = layers[name]
+        processor_map = 0 if ll['proc_count'] == 0 else \
+            allocate_processors(
+                name,
+                ll['proc_used'],
+                ll['weight_cost'],
+                hwc=ll['data_format'] if 'data_format' in ll else True,
+            )
         ll['processors'] = processor_map
 
-        out_offset = allocate_offset(name, processor_map, out_offset)
+    # TODO: Set out_offset properly
+    out_offset: int = 0  # Start at 0 (default input offset)
+
+    for (name, ll) in layers.items():
+        out_offset = allocate_offset(name, ll['processors'], out_offset)
         ll['out_offset'] = out_offset
 
-    # 10 - Print
-    target_dir = os.path.dirname(filename)
+    # 11 - TODO: Set output_processors for non-sequential layers
+
+    # 12 - Print
+    target_dir: str = os.path.dirname(filename)
     if target_dir != '':
         os.makedirs(target_dir, exist_ok=True)
     with open(filename, mode='w', encoding='utf-8') as f:
