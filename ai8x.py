@@ -1395,7 +1395,7 @@ class Sub(Eltwise):
         super().__init__(self.sub)
 
 
-class Xor(Eltwise):
+class BitwiseXor(Eltwise):
     """
     Elementwise Bitwise Xor Operation
     """
@@ -1415,7 +1415,7 @@ class Xor(Eltwise):
         super().__init__(self.bitwise_xor)
 
 
-class Or(Eltwise):
+class BitwiseOr(Eltwise):
     """
     Elementwise Bitwise Or Operation
     """

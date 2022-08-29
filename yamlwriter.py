@@ -15,10 +15,6 @@ TODO: Testing
 
 NOTE: This code partially depends on ai8x.py:
       - Quantization information is expected in '.weight_bits'.
-
-The element-wise bitwise Or/Xor operators are currently not supported in ONNX, and the export will
-therefore fail. This code has provisions for BitwiseOr/BitwiseXor, which may need to be modified
-once the official ONNX operators become available.
 """
 import os
 from typing import Any, Callable, Dict, List, Optional, OrderedDict, Tuple, Union
@@ -72,6 +68,22 @@ def create(
 
     model = distiller.make_non_parallel_copy(model)
 
+    # Replace unsupported BitwiseOr and BitwiseXor with an Add() and record the locations.
+    # After ONNX conversion, put them back. This is necessary until PyTorch ONNX export supports
+    # BitwiseOr/BitwiseXor.
+    bitwise_replacements: List[Tuple[str, str]] = []
+
+    def replace_bitwise(m):
+        for attr_str in dir(m):
+            target_attr = getattr(m, attr_str)
+            if isinstance(target_attr, ai8x.BitwiseXor) or isinstance(target_attr, ai8x.BitwiseOr):
+                print(attr_str)
+                source = 'bitwise_or' if isinstance(target_attr, ai8x.BitwiseOr) else 'bitwise_xor'
+                bitwise_replacements.append((attr_str, source))
+                setattr(m, attr_str, ai8x.Add())
+
+    model.apply(replace_bitwise)
+
     # Apply the QAT policy early to set weight_bits
     ai8x.fuse_bn_layers(model)
     if qat_policy is not None:
@@ -90,7 +102,13 @@ def create(
         if len(shape) > 1:
             shapes[i] = shape[1:]  # Remove batch dimension
 
+    # all_ops is the main dictionary for the layers
     all_ops: OrderedDict[str, Dict[str, Any]] = g.ops
+
+    # Put the bitwise operations back
+    for (attr_str, bitwise_op) in bitwise_replacements:
+        assert all_ops[attr_str]['type'] == 'Add'
+        all_ops[attr_str]['type'] = 'BitwiseOr' if bitwise_op == 'bitwise_or' else 'BitwiseXor'
 
     # ONNX operators for convolution:
     convolution_ops: Tuple[str, ...] = ('Conv', 'ConvTranspose', 'Gemm', 'MatMul')
@@ -1034,33 +1052,6 @@ def create(
                     if item_procs % 4 != 0:
                         item_procs += 4 - item_procs % 4
                     shift += item_procs
-
-    # Add 'processors' to the remaining layers
-    for (name, ll) in layers.items():
-        if 'processors' in ll:
-            continue
-        assert name == ''
-        if ll['proc_count'] > 60:  # Shortcut when using all processors
-            ll['processors'] = (1 << ll['proc_count']) - 1
-            continue
-        # First priority: Match the output processors of the producing layers
-        if name in all_inputs and 'output_processors' in ll[all_inputs[name][0]]:
-            if 'concat' in ll:
-                # Create the union of all output_processors
-                # TODO: Fill in any inner 0-bits.
-                # print(f'XXX UNION XXX, existing processor_map {processor_map:016x}')
-                union_map = 0
-                for ie in all_inputs[name]:
-                    assert 'output_processors' in layers[ie]
-                    union_map |= layers[ie]['output_processors']
-                ll['processors'] = union_map
-            else:
-                ll['processors'] = ll['output_processors'][ll[all_inputs[name][0]]]
-        elif 'output_processors' in ll and ll['main_op'] == 'Passthrough':
-            ll['processors'] = ll['output_processors']
-        else:
-            ll['processors'] = (1 << ll['proc_count']) - 1
-        # print('Setting', name, f'processors to {ll["processors"]:016x}')
 
     # 11 - Set output_offset. TODO: Use real algorithm
     out_offset: int = 0  # Start at 0 (default input offset)
