@@ -404,16 +404,6 @@ def main():
 
     activations_collectors = create_activation_stats_collectors(model, *args.activation_stats)
 
-    if args.qe_calibration:
-        msglogger.info('Quantization calibration stats collection enabled:')
-        msglogger.info('\tStats will be collected for %.1f%% of test dataset', args.qe_calibration)
-        msglogger.info('\tSetting constant seeds and converting model to serialized execution')
-        distiller.set_deterministic()
-        model = distiller.make_non_parallel_copy(model)
-        activations_collectors.update(create_quantization_stats_collector(model))
-        args.evaluate = True
-        args.effective_test_size = args.qe_calibration
-
     # Load the datasets
     train_loader, val_loader, test_loader, _ = apputils.get_data_loaders(
         args.datasets_fn, (os.path.expanduser(args.data), args), args.batch_size,
