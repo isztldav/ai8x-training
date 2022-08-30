@@ -42,7 +42,7 @@ def allocate_offset(
     return HALF_DATA if prev_offset == 0 else 0
 
 
-# pylint: disable=too-many-branches, too-many-statements
+# pylint: disable=too-many-branches, too-many-statements, too-many-locals
 def create(
         model: Any,
         dataset: str,
@@ -76,7 +76,7 @@ def create(
     def replace_bitwise(m):
         for attr_str in dir(m):
             target_attr = getattr(m, attr_str)
-            if isinstance(target_attr, ai8x.BitwiseXor) or isinstance(target_attr, ai8x.BitwiseOr):
+            if isinstance(target_attr, (ai8x.BitwiseXor, ai8x.BitwiseOr)):
                 print(attr_str)
                 source = 'bitwise_or' if isinstance(target_attr, ai8x.BitwiseOr) else 'bitwise_xor'
                 bitwise_replacements.append((attr_str, source))
@@ -853,7 +853,7 @@ def create(
             continue  # This shouldn't ever happen except for the final layer
 
         # print(name, 'grouping everything in', all_outputs[name])
-        # XXX What is the output shape of this layer? May need the processor_count
+        # FIXME What is the output shape of this layer? May need the processor_count
         merge_buckets: List[int] = []
         for i, (_, _, n) in enumerate(cost_list):
             if n in all_outputs[name]:
@@ -898,8 +898,8 @@ def create(
             if 'concat' in layers[name]:  # For concatenation, we need partials
                 assert group_procs < 0 or group_procs == processors \
                     or group_procs == processors // len(all_inputs[name])
-                # TODO: a straight divide may not be correct
-                # TODO: If there's a concat target, make sure to leave the extra space
+                # FIXME: a straight divide may not be correct
+                # FIXME: If there's a concat target, make sure to leave the extra space
                 # print('Found a concat, should set min_shift')
                 # min_shift = max(min_shift, processors // len(all_inputs[name]))
             else:
@@ -952,19 +952,19 @@ def create(
             if weight_cost == 0:
                 min_cost = (0, min_shift)
                 break
-            else:
-                cost: List[int] = weights_used.copy()
 
-                for p in range(64):
-                    for d, (item_cost, item_procs, _) in enumerate(data):
-                        if shifted_map[d] & (1 << p):
-                            cost[p] += item_cost
+            cost: List[int] = weights_used.copy()
 
-                max_cost = max(cost)  # High water mark
+            for p in range(64):
+                for d, (item_cost, item_procs, _) in enumerate(data):
+                    if shifted_map[d] & (1 << p):
+                        cost[p] += item_cost
 
-                if max_cost < min_cost[0]:  # Better option?
-                    min_cost = (max_cost, shift)
-                    processor_map = shifted_map.copy()
+            max_cost = max(cost)  # High water mark
+
+            if max_cost < min_cost[0]:  # Better option?
+                min_cost = (max_cost, shift)
+                processor_map = shifted_map.copy()
 
         if weight_cost > 0:
             # Accounting based on the result
