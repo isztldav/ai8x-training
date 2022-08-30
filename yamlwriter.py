@@ -190,7 +190,7 @@ def create(
             for t in trace_out:
                 for p in all_ops:
                     if t in all_ops[p]['inputs']:
-                        if all_ops[p]['type'] == 'Min':
+                        if all_ops[p]['type'] in ('Min', 'Clip'):
                             results.append(p)
                         else:
                             next_trace += all_ops[p]['outputs']
@@ -399,8 +399,7 @@ def create(
             if 'wide' in all_ops[name] and all_ops[name]['wide']:
                 this_layer['output_width'] = 32
             this_layer['have_bias'] = 'biases' in all_ops[name]
-            this_layer['weight_count'] = \
-                sum(model.get_parameter(w).numel() for w in all_ops[name]['weights'])
+            this_layer['weight_count'] = int(all_ops[name]['attrs']['weights_vol'])
 
         # Check whether inputs need to be flattened (when they are not in 1x1 dimensions)
         flatten: bool = False
