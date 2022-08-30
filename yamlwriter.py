@@ -23,6 +23,7 @@ import distiller
 
 import ai8x
 import devices
+import torchshim
 
 
 def allocate_offset(
@@ -164,6 +165,11 @@ def create(
             trace_in = next_trace
 
         return results
+
+    # PyTorch 1.8.1 compatibility
+    for n in all_ops:
+        if all_ops[n]['type'].startswith('prim::'):
+            all_ops[n]['type'] = all_ops[n]['type'][6:]  # Cleanup types for PyTorch 1.8.1
 
     # 1 - Set output_width to 32 where needed
     # Trace all "-32768" constants to the next 'Min' operation (there may be more than one)
@@ -384,10 +390,11 @@ def create(
             # Quantization uses hard-coded name from ai8x.py
             quantization = 8
             try:
-                quantization = int(model.get_parameter(name + '.weight_bits'))
+                quantization = int(torchshim.get_parameter(model, name + '.weight_bits'))
             except AttributeError:
                 try:
-                    quantization = int(model.get_parameter(canonical_name(name) + '.weight_bits'))
+                    quantization = int(torchshim.get_parameter(model, canonical_name(name)
+                                                               + '.weight_bits'))
                 except AttributeError:
                     pass
             if quantization not in (0, 8):
