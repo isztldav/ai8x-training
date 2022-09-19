@@ -286,7 +286,7 @@ def quantize_clamp(wide, quantize_activation=False, weight_bits=8):
             if not wide:
                 quantize = Quantize(num_bits=dev.ACTIVATION_BITS)
             else:
-                quantize = Quantize(num_bits=dev.DATA_BITS, num_extra_bit_shift=1)
+                quantize = Quantize(num_bits=dev.WIDE_LAYER_RESOLUTION_BITS)
         else:
             quantize = Empty()
         if not wide:
@@ -1483,6 +1483,7 @@ class DevAI85(Device):
         self.ACTIVATION_BITS = 8
         self.FULL_ACC_BITS = 30
         self.FC_ACTIVATION_BITS = 16
+        self.WIDE_LAYER_RESOLUTION_BITS = 15
 
         self.WEIGHT_INPUTS = 256
         self.WEIGHT_DEPTH = 768
@@ -1505,6 +1506,7 @@ class DevAI87(Device):
         self.ACTIVATION_BITS = 8
         self.FULL_ACC_BITS = 30
         self.FC_ACTIVATION_BITS = 16
+        self.WIDE_LAYER_RESOLUTION_BITS = 15
 
         self.WEIGHT_INPUTS = 256
         self.WEIGHT_DEPTH = 5120
