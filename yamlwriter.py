@@ -363,6 +363,8 @@ def create(
             else:
                 this_layer['avg_pool'] = shape
             this_layer['pool_stride'] = all_ops[name]['attrs']['strides'][0]
+            if 'dilations' in all_ops[name]['attrs']:
+                this_layer['pool_dilation'] = all_ops[name]['attrs']['dilations']
         elif op in ('Abs', 'Relu'):
             this_layer['activate'] = op
         else:
@@ -579,6 +581,8 @@ def create(
                 ll['max_pool'] = prev['max_pool']
             if 'pool_stride' in prev:
                 ll['pool_stride'] = prev['pool_stride']
+            if 'pool_dilation' in prev:
+                ll['pool_dilation'] = prev['pool_dilation']
             if 'data_format' in prev:
                 ll['data_format'] = prev['data_format']
 
@@ -646,6 +650,8 @@ def create(
                 ll['pool_first'] = 'false'
             if 'pool_stride' in prev:
                 ll['pool_stride'] = prev['pool_stride']
+            if 'pool_dilation' in prev:
+                ll['pool_dilation'] = prev['pool_dilation']
             if 'data_format' in prev:
                 ll['data_format'] = prev['data_format']
             ll['eltwise'] = prev['eltwise']
@@ -1188,6 +1194,8 @@ def create(
                 f.write(f"    avg_pool: {ll['avg_pool']}\n")
             if 'pool_stride' in ll:
                 f.write(f"    pool_stride: {ll['pool_stride']}\n")
+            if 'pool_dilation' in ll:
+                f.write(f"    pool_dilation: {ll['pool_dilation']}\n")
             if 'write_gap' in ll:
                 f.write(f"    write_gap: {ll['write_gap']}\n")
             if 'output_processors' in ll:
