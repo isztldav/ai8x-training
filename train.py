@@ -782,7 +782,7 @@ def train(train_loader, model, criterion, optimizer, epoch,
                 if args.show_train_accuracy == 'full' or \
                        (args.show_train_accuracy == 'last_batch'
                         and train_step >= len(train_loader)-2):
-                    if len(output.data.shape) <= 2:
+                    if len(output.data.shape) <= 2 or args.regression:
                         classerr.add(output.data, target)
                     else:
                         classerr.add(output.data.permute(0, 2, 3, 1).flatten(start_dim=0,
@@ -1064,6 +1064,8 @@ def _validate(data_loader, model, criterion, loggers, args, epoch=-1, tflogger=N
                         if (hasattr(model.__dict__['_modules'][key], 'wide')
                                 and model.__dict__['_modules'][key].wide):
                             output_boxes /= 256.
+                if args.regression:
+                    target /= 128.
 
                 output = (output_boxes, output_conf)
 
@@ -1114,7 +1116,7 @@ def _validate(data_loader, model, criterion, loggers, args, epoch=-1, tflogger=N
                 losses['objective_loss'].add(loss.item())
 
                 if not args.obj_detection:
-                    if len(output.data.shape) <= 2:
+                    if len(output.data.shape) <= 2 or args.regression:
                         classerr.add(output.data, target)
                     else:
                         classerr.add(output.data.permute(0, 2, 3, 1).flatten(start_dim=0,
