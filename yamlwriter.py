@@ -66,6 +66,8 @@ def create(
         print(f'Unknown device {ai8x.dev.device}')
         return
 
+    MAX_PROC = 64
+
     model = distiller.make_non_parallel_copy(model)
 
     # Replace unsupported BitwiseOr and BitwiseXor with an Add() and record the locations.
@@ -625,7 +627,7 @@ def create(
                 prev_name = name
                 continue
             # MAX78002 - avoid element-wise with bias and convolution when using multi-pass
-            if ai8x.dev.device == 87 and ll['have_bias'] and prev['proc_count'] > 64:
+            if ai8x.dev.device == 87 and ll['have_bias'] and prev['proc_count'] > MAX_PROC:
                 prev_name = name
                 continue
             # Combine both layers
@@ -778,7 +780,7 @@ def create(
         if operands == 1:
             operands = len(ll['in_sequences'])
             # Concat instead of interleave for small channel counts
-            if ll['proc_count'] <= 64:
+            if ll['proc_count'] <= MAX_PROC:
                 ll['concat'] = True
                 for i, ie in enumerate(ll['in_sequences']):
                     lin = layers[ie]
@@ -798,18 +800,19 @@ def create(
         oshape = shapes[outputs[name][0]]
         ll['concat_shape'] = oshape[0]
 
-    def calculate_processors(processors: int) -> int:
+    def calculate_processors(processors: int) -> Tuple[int, int]:
         """
         Given a channel count, return the multi-pass adjusted processor count
         """
-        if processors > 64:  # Multi-pass processor count
-            divider: int = (processors + 63) // 64
-            processors = (processors + divider - 1) // divider  # Rounded up
+        multipass: int = 1
+        if processors > MAX_PROC:  # Multi-pass processor count
+            multipass = (processors + MAX_PROC - 1) // MAX_PROC
+            processors = (processors + multipass - 1) // multipass  # Rounded up
             remainder: int = processors % 4
             if remainder != 0:
                 remainder = 4 - remainder
             processors += remainder  # To next multiple of 4
-        return processors
+        return processors, multipass
 
     # cost_list: processors/weights per layer for Conv layers with 60 or fewer processors
     cost_list: List[Tuple[int, int, str]] = []
@@ -817,13 +820,15 @@ def create(
     for (name, ll) in layers.items():
         hwc = ll['data_format'] if 'data_format' in ll else True
         processors = ll['proc_count']
+        multipass: int = 1
         # Calculate the final number of used processors
         if hwc:
-            processors = calculate_processors(processors)
-            assert processors <= 64
+            processors, multipass = calculate_processors(processors)
+            assert processors <= MAX_PROC
         else:
-            assert processors <= 16
+            assert processors <= MAX_PROC // 4
         ll['proc_used'] = processors
+        ll['multipass'] = multipass
 
         weights_per_processor: int = 0
         if ll['main_op'] in ('Conv', 'ConvTranspose', 'Linear'):
@@ -894,7 +899,7 @@ def create(
         group_procs: int = -1
         group_item: List[Tuple[int, int, str]] = []
         min_shift = 0
-        last_processor = 63
+        last_processor = MAX_PROC - 1
         for (weights_per_processor, processors, name) in b:
             # print('examining - weights', weights_per_processor, 'procs', processors, 'name',
             #       name, 'concat', 'YES' if 'concat' in layers[name] else 'NO')
@@ -920,7 +925,7 @@ def create(
 
     # 10 - Assign processors
     # TODO: Real algorithm for output_offset
-    weights_used: List[int] = [0] * 64
+    weights_used: List[int] = [0] * MAX_PROC
 
     def allocate_processors(
             weight_cost: int,
@@ -941,7 +946,7 @@ def create(
         processor_map: List[int] = shifted_map
 
         # Move processor map left if needed to achieve the lowest combined 'weights_used'
-        for shift in range(min_shift, 64 - count + 1, 4):
+        for shift in range(min_shift, MAX_PROC - count + 1, 4):
             for d, (item_cost, item_procs, _) in enumerate(data):
                 if hwc:
                     # Pick "count" processors starting from 0
@@ -960,7 +965,7 @@ def create(
 
             cost: List[int] = weights_used.copy()
 
-            for p in range(64):
+            for p in range(MAX_PROC):
                 for d, (item_cost, item_procs, _) in enumerate(data):
                     if shifted_map[d] & (1 << p):
                         cost[p] += item_cost
@@ -973,7 +978,7 @@ def create(
 
         if weight_cost > 0:
             # Accounting based on the result
-            for p in range(64):
+            for p in range(MAX_PROC):
                 proc_used: bool = False
                 for d, _ in enumerate(data):
                     if processor_map[d] & (1 << p):
