@@ -1513,7 +1513,6 @@ def summarize_model(model, dataset, which_summary, filename='model'):
             filename + '.onnx',
             dataset,
             add_softmax=False,
-            opset_version=13,
         )
     else:
         distiller.model_summary(model, which_summary, dataset, log_1d=True)
