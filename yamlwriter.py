@@ -17,6 +17,7 @@ NOTE: This code partially depends on ai8x.py:
       - Quantization information is expected in '.weight_bits'.
 """
 import os
+import warnings
 from typing import Any, Callable, Dict, List, Optional, OrderedDict, Tuple, Union
 
 import distiller
@@ -65,6 +66,14 @@ def create(
     else:
         print(f'Unknown device {ai8x.dev.device}')
         return
+
+    # Filter warnings
+    s = 'The shape inference of prim::Constant type is missing, so it may result in wrong '\
+        'shape inference for the exported graph. Please consider adding it in symbolic function.'
+    warnings.filterwarnings(action='ignore', message=s)
+    s = 'Constant folding - Only steps=1 can be constant folded for opset >= 10 onnx::Slice op. ' \
+        'Constant folding not applied.'
+    warnings.filterwarnings(action='ignore', message=s)
 
     MAX_PROC = 64
 
