@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 ###################################################################################################
 #
-# Copyright (C) 2019-2022 Maxim Integrated Products, Inc. All Rights Reserved.
+# Copyright (C) 2019-2023 Maxim Integrated Products, Inc. All Rights Reserved.
 #
 # Maxim Integrated Products, Inc. Default Copyright Notice:
 # https://www.maximintegrated.com/en/aboutus/legal/copyrights.html
@@ -96,7 +96,7 @@ from torch.backends import cudnn
 import distiller
 import shap
 import torchnet.meter as tnt
-from distiller import apputils, model_summaries
+from distiller import apputils, model_summaries  # type: ignore[attr-defined]
 from distiller.data_loggers import PythonLogger, TensorBoardLogger
 # pylint: disable=no-name-in-module
 from distiller.data_loggers.collector import (QuantCalibrationStatsCollector,
@@ -380,7 +380,7 @@ def main():
         if not args.regression:
             if 'weight' in selected_source:
                 criterion = nn.CrossEntropyLoss(
-                    torch.Tensor(selected_source['weight'])
+                    torch.tensor(selected_source['weight'], dtype=torch.float)
                 ).to(args.device)
             else:
                 criterion = nn.CrossEntropyLoss().to(args.device)
@@ -470,7 +470,7 @@ def main():
 
     if args.nas:
         assert isinstance(model, ai8x_nas.OnceForAllModel), 'Model should implement ' \
-                                        'OnceForAllModel interface for NAS training!'
+            'OnceForAllModel interface for NAS training!'
         if nas_policy:
             args.nas_stage_transition_list = create_nas_training_stage_list(model, nas_policy)
             # pylint: disable=unsubscriptable-object
@@ -767,6 +767,9 @@ def train(train_loader, model, criterion, optimizer, epoch,
         else:
             output = args.kd_policy.forward(inputs)
 
+        if args.out_fold_ratio != 1:
+            output = ai8x.unfold_batch(output, args.out_fold_ratio)
+
         loss = criterion(output, target)
         # TODO Early exit mechanism for Object Detection case is NOT implemented yet
         if not args.obj_detection:
@@ -775,7 +778,7 @@ def train(train_loader, model, criterion, optimizer, epoch,
                 # calculation last two batches are used as the last batch might include just a few
                 # samples.
                 if args.show_train_accuracy == 'full' or \
-                       (args.show_train_accuracy == 'last_batch'
+                    (args.show_train_accuracy == 'last_batch'
                         and train_step >= len(train_loader)-2):
                     if len(output.data.shape) <= 2 or args.regression:
                         classerr.add(output.data, target)
@@ -915,11 +918,11 @@ def test(test_loader, model, criterion, loggers, activations_collectors, args):
             with torch.no_grad():
                 global weight_min, weight_max, weight_count  # pylint: disable=global-statement
                 global weight_sum, weight_stddev, weight_mean  # pylint: disable=global-statement
-                weight_min = torch.Tensor(float('inf'))
-                weight_max = torch.Tensor(float('-inf'))
-                weight_count = torch.Tensor(0, dtype=torch.int)
-                weight_sum = torch.Tensor(0.0)
-                weight_stddev = torch.Tensor(0.0)
+                weight_min = torch.tensor(float('inf')).to(args.device)
+                weight_max = torch.tensor(float('-inf')).to(args.device)
+                weight_count = torch.tensor(0, dtype=torch.int).to(args.device)
+                weight_sum = torch.tensor(0.0).to(args.device)
+                weight_stddev = torch.tensor(0.0).to(args.device)
 
                 def traverse_pass1(m):
                     """
@@ -1087,6 +1090,8 @@ def _validate(data_loader, model, criterion, loggers, args, epoch=-1, tflogger=N
                 inputs, target = inputs.to(args.device), target.to(args.device)
                 # compute output from model
                 output = model(inputs)
+                if args.out_fold_ratio != 1:
+                    output = ai8x.unfold_batch(output, args.out_fold_ratio)
 
                 # correct output for accurate loss calculation
                 if args.act_mode_8bit:
@@ -1369,8 +1374,9 @@ def earlyexit_validate_loss(output, target, _criterion, args):
             if args.loss_exits[exitnum][batch_index] < args.earlyexit_thresholds[exitnum]:
                 # take the results from early exit since lower than threshold
                 args.exiterrors[exitnum].add(
-                    torch.Tensor(
-                        np.array(output[exitnum].data[batch_index].cpu(), ndmin=2)
+                    torch.tensor(
+                        np.array(output[exitnum].data[batch_index].cpu(), ndmin=2),
+                        dtype=torch.float
                     ),
                     torch.full([1], target[batch_index], dtype=torch.long))
                 args.exit_taken[exitnum] += 1
@@ -1380,8 +1386,9 @@ def earlyexit_validate_loss(output, target, _criterion, args):
         if not earlyexit_taken:
             exitnum = args.num_exits - 1
             args.exiterrors[exitnum].add(
-                torch.Tensor(
-                    np.array(output[exitnum].data[batch_index].cpu(), ndmin=2)
+                torch.tensor(
+                    np.array(output[exitnum].data[batch_index].cpu(), ndmin=2),
+                    dtype=torch.float
                 ),
                 torch.full([1], target[batch_index], dtype=torch.long))
             args.exit_taken[exitnum] += 1
@@ -1593,6 +1600,7 @@ def get_next_stage_start_epoch(epoch, stage_transition_list, num_epochs):
 
 class missingdict(dict):
     """This is a little trick to prevent KeyError"""
+
     def __missing__(self, key):
         return None  # note, does *not* set self[key] - we don't want defaultdict's behavior
 
