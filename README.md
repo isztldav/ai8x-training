@@ -1,6 +1,6 @@
 # ADI MAX78000/MAX78002 Model Training and Synthesis
 
-January 23, 2023
+February 9, 2023
 
 ADI’s MAX78000/MAX78002 project is comprised of five repositories:
 
@@ -265,7 +265,7 @@ $ ~/.pyenv/bin/pyenv init
 
 *Note: Installing both conda and pyenv in parallel may cause issues. Ensure that the pyenv initialization tasks are executed <u>before</u> any conda related tasks.*
 
-Next, close the Terminal, open a new Terminal and install Python 3.8.11.
+Next, close the Terminal, open a new Terminal and install Python 3.8.16.
 
 On macOS:
 
@@ -277,13 +277,13 @@ $ env \
   PKG_CONFIG_PATH="$(brew --prefix tcl-tk)/lib/pkgconfig" \
   CFLAGS="-I$(brew --prefix tcl-tk)/include" \
   PYTHON_CONFIGURE_OPTS="--with-tcltk-includes='-I$(brew --prefix tcl-tk)/include' --with-tcltk-libs='-L$(brew --prefix tcl-tk)/lib -ltcl8.6 -ltk8.6'" \
-  pyenv install 3.8.11
+  pyenv install 3.8.16
 ```
 
 On Linux, including WSL2:
 
 ```shell
-$ pyenv install 3.8.11
+$ pyenv install 3.8.16
 ```
 
 #### git Environment
@@ -323,17 +323,17 @@ $ cd ai8x-training
 
 The default branch is “develop” which is updated most frequently. If you want to use the “master” branch instead, switch to “master” using `git checkout master`.
 
-If using pyenv, set the local directory to use Python 3.8.11.
+If using pyenv, set the local directory to use Python 3.8.16.
 
 ```shell
-$ pyenv local 3.8.11
+$ pyenv local 3.8.16
 ```
 
 In all cases, verify that a 3.8.x version of Python is used:
 
 ```shell
 $ python --version
-Python 3.8.11
+Python 3.8.16
 ```
 
 If this does <u>*not*</u> return version 3.8.x, please install and initialize [pyenv](#python-38).
@@ -419,11 +419,11 @@ Please *also* update the MSDK or use the Maintenance Tool as documented in the [
 
 ##### Python Version Updates
 
-Updating Python may require updating `pyenv` first. Should `pyenv install 3.8.11` fail,
+Updating Python may require updating `pyenv` first. Should `pyenv install 3.8.16` fail,
 
 ```shell
-$ pyenv install 3.8.11
-python-build: definition not found: 3.8.11
+$ pyenv install 3.8.16
+python-build: definition not found: 3.8.16
 ```
 
 then `pyenv` must be updated. On macOS, use:
@@ -446,12 +446,12 @@ $
 The update should now succeed:
 
 ```shell
-$ pyenv install 3.8.11
-Downloading Python-3.8.11.tar.xz...
--> https://www.python.org/ftp/python/3.8.11/Python-3.8.11.tar.xz
-Installing Python-3.8.11...
+$ pyenv install 3.8.16
+Downloading Python-3.8.16.tar.xz...
+-> https://www.python.org/ftp/python/3.8.16/Python-3.8.16.tar.xz
+Installing Python-3.8.16...
 ...
-$ pyenv local 3.8.11
+$ pyenv local 3.8.16
 ```
 
 
@@ -478,14 +478,14 @@ If you want to use the main branch, switch to “master” using the optional co
 If using pyenv, run:
 
 ```shell
-$ pyenv local 3.8.11
+$ pyenv local 3.8.16
 ```
 
 In all cases, make sure Python 3.8.x is the active version:
 
 ```shell
 $ python --version
-Python 3.8.11
+Python 3.8.16
 ```
 
 If this does <u>*not*</u> return version 3.8.x, please install and initialize [pyenv](#python-38).
@@ -1314,8 +1314,8 @@ If hardware acceleration is not available, skip the following two steps and cont
    ```shell
    (ai8x-training) $ python check_cuda.py
    System:            linux
-   Python version:    3.8.11 (default, Jul 14 2021, 12:46:05) [GCC 9.3.0]
-   PyTorch version:   1.13.0+cu117
+   Python version:    3.8.16 (default, Feb  9 2023, 14:12:01) [GCC 9.3.0]
+   PyTorch version:   1.13.1+cu117
    CUDA acceleration: available in PyTorch
    ```
 
