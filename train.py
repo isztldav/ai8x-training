@@ -224,14 +224,14 @@ def main():
         # https://discuss.pytorch.org/t/what-does-torch-backends-cudnn-benchmark-do/5936/3
         cudnn.benchmark = True
 
-    if args.cpu or not torch.cuda.is_available():
+    if args.cpu or (not torch.cuda.is_available() and not torch.backends.mps.is_available()):
         if not args.cpu:
             # Print warning if no hardware acceleration
-            print("WARNING: CUDA hardware acceleration is not available, training will be slow")
+            print("WARNING: No CUDA or MPS hardware acceleration, training will be slow")
         # Set GPU index to -1 if using CPU
         args.device = 'cpu'
         args.gpus = -1
-    else:
+    elif torch.cuda.is_available():
         args.device = 'cuda'
         if args.gpus is not None:
             try:
@@ -246,6 +246,8 @@ def main():
                                      f'{available_gpus} devices available')
             # Set default device in case the first one on the list != 0
             torch.cuda.set_device(args.gpus[0])
+    else:
+        args.device = 'mps'
 
     if args.earlyexit_thresholds:
         args.num_exits = len(args.earlyexit_thresholds) + 1

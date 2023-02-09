@@ -62,7 +62,7 @@ Full support and documentation are provided for the following platform:
 
 * CPU: 64-bit amd64/x86_64 “PC” with [Ubuntu Linux 20.04 LTS](https://ubuntu.com/download/server)
 * GPU for hardware acceleration (optional but highly recommended): Nvidia with [CUDA 11](https://developer.nvidia.com/cuda-toolkit-archive)
-* [PyTorch 1.13.0](https://pytorch.org/get-started/locally/) on Python 3.8.x
+* [PyTorch 1.13.1](https://pytorch.org/get-started/locally/) on Python 3.8.x
 
 Limited support and advice for using other hardware and software combinations is available as follows.
 
@@ -84,7 +84,7 @@ If WSL2 is not available, it is also possible (but not recommended due to inhere
 
 ##### macOS
 
-The software works on macOS, but model training suffers from the lack of hardware acceleration.
+The software works on macOS and uses MPS acceleration on Apple Silicon. On Intel CPUs, model training suffers from the lack of hardware acceleration.
 
 ##### Virtual Machines (Unsupported)
 
@@ -96,19 +96,20 @@ This software also works inside Docker containers. However, CUDA support inside 
 
 #### PyTorch and Python
 
-The officially supported version of [PyTorch is 1.13.0](https://pytorch.org/get-started/locally/) running on Python 3.8.x. Newer versions will typically work, but are not covered by support, documentation, and installation scripts.
+The officially supported version of [PyTorch is 1.13.1](https://pytorch.org/get-started/locally/) running on Python 3.8.x. Newer versions will typically work, but are not covered by support, documentation, and installation scripts.
 
 #### Hardware Acceleration
 
-When going beyond simple models, model training does not work well without CUDA hardware acceleration. The network loader (“izer”) does <u>not</u> require CUDA, and very simple models can also be trained on systems without CUDA.
+When going beyond simple models, model training does not work well without CUDA or MPS hardware acceleration. The network loader (“izer”) does <u>not</u> require CUDA or MPS, and very simple models can also be trained on systems without CUDA or MPS.
 
 * CUDA requires Nvidia GPUs.
 
+* MPS requires Apple Silicon (M1 or newer) and macOS 12.3 or newer.
+
 * There is a PyTorch pre-release with ROCm acceleration for certain AMD GPUs on Linux ([see blog entry](https://pytorch.org/blog/pytorch-for-amd-rocm-platform-now-available-as-python-package/)), but this is not currently covered by the installation instructions in this document, and it is not supported.
 
-* At this time, there is neither CUDA nor ROCm nor Neural Engine support on macOS, and therefore no hardware acceleration (there is a pre-release version of PyTorch with M1 acceleration on macOS 12.3 or later, and M1 acceleration will be supported in a future release of these tools).
-
 * PyTorch does not include CUDA support for aarch64/arm64 systems. *Rebuilding PyTorch from source is not covered by this document.*
+
 
 ##### Using Multiple GPUs
 
@@ -159,7 +160,7 @@ Some additional system packages are required, and installation of these addition
 
 ##### macOS
 
-On macOS (no CUDA support available) use:
+On macOS use:
 
 ```shell
 $ brew install libomp libsndfile tcl-tk
@@ -223,7 +224,7 @@ Python 2 **will not function correctly** with the MAX78000/MAX78002 tools. If th
 
 It is not necessary to install Python 3.8 system-wide, or to rely on the system-provided Python. To manage Python versions, instead use `pyenv` (<https://github.com/pyenv/pyenv>). This allows multiple Python versions to co-exist on the same system without interfering with the system or with one another.
 
-On macOS (no CUDA support available):
+On macOS:
 
 ```shell
 $ brew install pyenv pyenv-virtualenv
@@ -458,7 +459,7 @@ $ pyenv local 3.8.16
 
 #### Synthesis Project
 
-The `ai8x-synthesis` project does not require CUDA.
+The `ai8x-synthesis` project does not require CUDA or MPS.
 
 Start by deactivating the `ai8x-training` environment if it is active.
 
@@ -1294,30 +1295,31 @@ The example shows a fractionally-strided convolution with a stride of 2, a pad o
 
 If hardware acceleration is not available, skip the following two steps and continue with [Training Script](#training-script).
 
-1. Before the first training session, check that CUDA hardware acceleration is available using `nvidia-smi -q`:
+Before the first training session, check that CUDA or MPS hardware acceleration are available and recognized by PyTorch:
 
-   ```shell
-   (ai8x-training) $ nvidia-smi -q
-   ...
-   Driver Version                            : 515.65.01
-   CUDA Version                              : 11.7
-
-   Attached GPUs                             : 1
-   GPU 00000000:01:00.0
-       Product Name                          : NVIDIA TITAN RTX
-       Product Brand                         : Titan
-   ...
-   ```
-
-2. Verify that PyTorch recognizes CUDA:
-
-   ```shell
+ ```shell
    (ai8x-training) $ python check_cuda.py
    System:            linux
    Python version:    3.8.16 (default, Feb  9 2023, 14:12:01) [GCC 9.3.0]
    PyTorch version:   1.13.1+cu117
    CUDA acceleration: available in PyTorch
-   ```
+   MPS acceleration:  NOT available in PyTorch
+ ```
+
+CUDA can be diagnosed using `nvidia-smi -q`:
+
+```shell
+(ai8x-training) $ nvidia-smi -q
+...
+Driver Version                            : 515.65.01
+CUDA Version                              : 11.7
+
+Attached GPUs                             : 1
+GPU 00000000:01:00.0
+    Product Name                          : NVIDIA TITAN RTX
+    Product Brand                         : Titan
+...
+```
 
 ### Training Script
 
