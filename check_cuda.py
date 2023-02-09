@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 ###################################################################################################
-# Copyright (C) Maxim Integrated Products, Inc. All Rights Reserved.
+# Copyright (C) 2019-2023 Maxim Integrated Products, Inc. All Rights Reserved.
 #
 # Maxim Integrated Products, Inc. Default Copyright Notice:
 # https://www.maximintegrated.com/en/aboutus/legal/copyrights.html
@@ -36,3 +36,10 @@ if __name__ == '__main__':
         print("NOT available in PyTorch")
     else:
         print("available in PyTorch")
+
+    print("MPS acceleration:  ", end='')
+    if not torch.backends.mps.is_available():
+        print("NOT available in PyTorch")
+    else:
+        print("available in PyTorch")
+
