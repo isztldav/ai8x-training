@@ -1,6 +1,6 @@
 ###################################################################################################
 #
-# Copyright (C) 2022 Maxim Integrated Products, Inc. All Rights Reserved.
+# Copyright (C) 2022-2023 Maxim Integrated Products, Inc. All Rights Reserved.
 #
 # Maxim Integrated Products, Inc. Default Copyright Notice:
 # https://www.maximintegrated.com/en/aboutus/legal/copyrights.html
@@ -77,7 +77,7 @@ def create(
 
     MAX_PROC = 64
 
-    model = distiller.make_non_parallel_copy(model)
+    model = distiller.make_non_parallel_copy(model)  # type: ignore[attr-defined]
 
     # Replace unsupported BitwiseOr and BitwiseXor with an Add() and record the locations.
     # After ONNX conversion, put them back. This is necessary until PyTorch ONNX export supports
@@ -101,10 +101,12 @@ def create(
         ai8x.initiate_qat(model, qat_policy, export=True)
     ai8x.onnx_export_prep(model, simplify=False, remove_clamp=False)
 
-    dummy_input = distiller.get_dummy_input(dataset=None,
-                                            device=distiller.model_device(model),
-                                            input_shape=None)
-    g = distiller.SummaryGraph(model, dummy_input, True, '#')
+    dummy_input = distiller.get_dummy_input(  # type: ignore[attr-defined]
+        dataset=None,
+        device=distiller.model_device(model),  # type: ignore[attr-defined]
+        input_shape=None,
+    )
+    g = distiller.SummaryGraph(model, dummy_input, True, '#')  # type: ignore[attr-defined]
 
     # Get the input/output dimensions
     shapes: Dict[str, Tuple] = {}
