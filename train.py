@@ -247,6 +247,7 @@ def main():
             # Set default device in case the first one on the list != 0
             torch.cuda.set_device(args.gpus[0])
     else:
+        os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
         args.device = 'mps'
 
     if args.earlyexit_thresholds:
@@ -838,7 +839,7 @@ def train(train_loader, model, criterion, optimizer, epoch,
 
         # measure elapsed time
         batch_time.add(time.time() - end)
-        steps_completed = (train_step+1)
+        steps_completed = train_step + 1
 
         if steps_completed % args.print_freq == 0 or steps_completed == steps_per_epoch:
             # Log some statistics
@@ -1134,7 +1135,7 @@ def _validate(data_loader, model, criterion, loggers, args, epoch=-1, tflogger=N
             batch_time.add(time.time() - end)
             end = time.time()
 
-            steps_completed = (validation_step+1)
+            steps_completed = validation_step + 1
             if steps_completed % args.print_freq == 0 or steps_completed == total_steps:
                 if args.display_prcurves and tflogger is not None:
                     class_probs_batch = [torch.nn.functional.softmax(el, dim=0) for el in output]
@@ -1505,7 +1506,7 @@ def summarize_model(model, dataset, which_summary, filename='model'):
         model_summaries.draw_img_classifier_to_file(model, filename + '.png', dataset,
                                                     which_summary == 'png_w_params')
     elif which_summary in ['onnx', 'onnx_simplified']:
-        ai8x.onnx_export_prep(model, simplify=(which_summary == 'onnx_simplified'))
+        ai8x.onnx_export_prep(model, simplify=which_summary == 'onnx_simplified')
         model_summaries.export_img_classifier_to_onnx(
             model,
             filename + '.onnx',
