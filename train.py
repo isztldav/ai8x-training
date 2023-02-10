@@ -7,6 +7,7 @@
 # https://www.maximintegrated.com/en/aboutus/legal/copyrights.html
 #
 ###################################################################################################
+# pyright: reportMissingModuleSource=false
 #
 # Portions Copyright (c) 2018 Intel Corporation
 #
