@@ -1,6 +1,6 @@
 # ADI MAX78000/MAX78002 Model Training and Synthesis
 
-February 9, 2023
+February 10, 2023
 
 ADI’s MAX78000/MAX78002 project is comprised of five repositories:
 
@@ -61,7 +61,7 @@ PyTorch operating system and hardware support are constantly evolving. This docu
 Full support and documentation are provided for the following platform:
 
 * CPU: 64-bit amd64/x86_64 “PC” with [Ubuntu Linux 20.04 LTS](https://ubuntu.com/download/server)
-* GPU for hardware acceleration (optional but highly recommended): Nvidia with [CUDA 11](https://developer.nvidia.com/cuda-toolkit-archive)
+* GPU for hardware acceleration (optional but highly recommended): Nvidia with [CUDA 11.7](https://developer.nvidia.com/cuda-toolkit-archive)
 * [PyTorch 1.13.1](https://pytorch.org/get-started/locally/) on Python 3.8.x
 
 Limited support and advice for using other hardware and software combinations is available as follows.
@@ -100,14 +100,11 @@ The officially supported version of [PyTorch is 1.13.1](https://pytorch.org/get-
 
 #### Hardware Acceleration
 
-When going beyond simple models, model training does not work well without CUDA or MPS hardware acceleration. The network loader (“izer”) does <u>not</u> require CUDA or MPS, and very simple models can also be trained on systems without CUDA or MPS.
+When going beyond simple models, model training does not work well without hardware acceleration – Nvidia CUDA, AMD ROCm, or Apple Silicon MPS. The network loader (“izer”) does <u>not</u> require hardware acceleration, and very simple models can also be trained on systems without hardware acceleration.
 
-* CUDA requires Nvidia GPUs.
-
+* CUDA requires modern Nvidia GPUs. This is the most compatible, and best supported hardware accelerator.
+* ROCm requires certain AMD GPUs, see [blog entry](https://pytorch.org/blog/pytorch-for-amd-rocm-platform-now-available-as-python-package/).
 * MPS requires Apple Silicon (M1 or newer) and macOS 12.3 or newer.
-
-* There is a PyTorch pre-release with ROCm acceleration for certain AMD GPUs on Linux ([see blog entry](https://pytorch.org/blog/pytorch-for-amd-rocm-platform-now-available-as-python-package/)), but this is not currently covered by the installation instructions in this document, and it is not supported.
-
 * PyTorch does not include CUDA support for aarch64/arm64 systems. *Rebuilding PyTorch from source is not covered by this document.*
 
 
@@ -379,7 +376,13 @@ For CUDA 11.x on native Windows:
 (ai8x-training) $ pip3 install -r requirements-win-cu11.txt
 ```
 
-For all other systems, including macOS, and CUDA 10.2 on Linux:
+For ROCm 5.2 on Linux:
+
+```shell
+(ai8x-training) $ pip3 install -r requirements-rocm.txt
+```
+
+For all other systems, including macOS:
 
 ```shell
 (ai8x-training) $ pip3 install -r requirements.txt
@@ -459,7 +462,7 @@ $ pyenv local 3.8.16
 
 #### Synthesis Project
 
-The `ai8x-synthesis` project does not require CUDA or MPS.
+The `ai8x-synthesis` project does not require hardware acceleration.
 
 Start by deactivating the `ai8x-training` environment if it is active.
 
@@ -1295,15 +1298,15 @@ The example shows a fractionally-strided convolution with a stride of 2, a pad o
 
 If hardware acceleration is not available, skip the following two steps and continue with [Training Script](#training-script).
 
-Before the first training session, check that CUDA or MPS hardware acceleration are available and recognized by PyTorch:
+Before the first training session, check that hardware acceleration is available and recognized by PyTorch:
 
  ```shell
    (ai8x-training) $ python check_cuda.py
-   System:            linux
-   Python version:    3.8.16 (default, Feb  9 2023, 14:12:01) [GCC 9.3.0]
-   PyTorch version:   1.13.1+cu117
-   CUDA acceleration: available in PyTorch
-   MPS acceleration:  NOT available in PyTorch
+   System:                 linux
+   Python version:         3.8.16 (default, Feb  9 2023, 14:12:01) [GCC 9.3.0]
+   PyTorch version:        1.13.1+cu117
+   CUDA/ROCm acceleration: available in PyTorch
+   MPS acceleration:       NOT available in PyTorch
  ```
 
 CUDA can be diagnosed using `nvidia-smi -q`:

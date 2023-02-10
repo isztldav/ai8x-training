@@ -228,7 +228,7 @@ def main():
     if args.cpu or (not torch.cuda.is_available() and not torch.backends.mps.is_available()):
         if not args.cpu:
             # Print warning if no hardware acceleration
-            print("WARNING: No CUDA or MPS hardware acceleration, training will be slow")
+            print("WARNING: No CUDA, ROCm, or MPS hardware acceleration, training will be slow")
         # Set GPU index to -1 if using CPU
         args.device = 'cpu'
         args.gpus = -1
