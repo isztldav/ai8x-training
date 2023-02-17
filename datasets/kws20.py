@@ -624,7 +624,7 @@ def KWS_get_datasets(data, load_train=True, load_test=True, num_classes=6):
     ])
 
     if num_classes in (6, 20):
-        classes = next((e for _, e in enumerate(datasets)
+        classes = next((e for e in datasets
                         if len(e['output']) - 1 == num_classes))['output'][:-1]
     else:
         raise ValueError(f'Unsupported num_classes {num_classes}')
@@ -685,10 +685,10 @@ def KWS_get_unquantized_datasets(data, load_train=True, load_test=True, num_clas
     transform = None
 
     if num_classes in (6, 20):
-        classes = next((e for _, e in enumerate(datasets)
+        classes = next((e for e in datasets
                         if len(e['output']) - 1 == num_classes))['output'][:-1]
     elif num_classes == 35:
-        classes = next((e for _, e in enumerate(datasets)
+        classes = next((e for e in datasets
                         if len(e['output']) == num_classes))['output']
     else:
         raise ValueError(f'Unsupported num_classes {num_classes}')
