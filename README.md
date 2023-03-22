@@ -1,6 +1,6 @@
 # ADI MAX78000/MAX78002 Model Training and Synthesis
 
-February 10, 2023
+March 22, 2023
 
 ADI’s MAX78000/MAX78002 project is comprised of five repositories:
 
@@ -659,7 +659,7 @@ The MAX78000/MAX78002 MSDK is available as a git repository. The repository cont
       $ pacman -S --needed base filesystem msys2-runtime make
       ```
 
-5. Install packages for OpenOCD. OpenOCD binaries are available in the “openocd” sub-folder of the ai8x-synthesis repository. However, some additional dependencies are required on most systems. See [openocd/Readme.md](openocd/Readme.md) for a list of packages to install, then return here to continue.
+5. Install packages for OpenOCD. OpenOCD binaries are available in the “openocd” sub-folder of the ai8x-synthesis repository. However, some additional dependencies are required on most systems. See [openocd/README.md](https://github.com/MaximIntegratedAI/ai8x-synthesis/blob/develop/openocd/README.md) for a list of packages to install, then return here to continue.
 
 6. Add the location of the toolchain binaries to the system path.
 
@@ -1882,7 +1882,6 @@ If the model initially trains correctly, but the quantized performance is signif
 
 If quantization-aware training is not desired, post-training quantization can be improved using more sophisticated methods. For example, see
 <https://github.com/pytorch/glow/blob/master/docs/Quantization.md>,
-<https://github.com/ARM-software/ML-examples/tree/master/cmsisnn-cifar10>,
 <https://github.com/ARM-software/ML-KWS-for-MCU/blob/master/Deployment/Quant_guide.md>,
 or Distiller’s approach (installed with this software).
 
@@ -2489,7 +2488,7 @@ This key describes whether to activate the layer output (the default is to not a
 
 ##### `quantization` (Optional)
 
-This key describes the width of the weight memory in bits and can be `1`, `2`, `4`, or `8` (the default is based on the range of the layer’s weights). Specifying a `quantization` that is smaller than what the weights require results in an error message. By default, the value is automatically derived from the weights.
+This key describes the width of the weight memory in bits and can be `1`, `2`, `4`, `8`, or `binary` (MAX78002 only). Specifying a `quantization` that is smaller than what the weights require results in an error message. The default value is based on the `weight_bits` field in `state_dict` read from the quantized checkpoint for the layer.
 
 *On MAX78002 only, `binary` sets the alternate 1-bit representation of –1/+1.*
 
