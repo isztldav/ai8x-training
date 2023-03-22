@@ -9,6 +9,8 @@
 """
 Generate YAML template from PyTorch model
 
+ALPHA version
+
 TODO: Implement smart processor and data memory allocator (out_offset, in_offset)
 TODO: Implement dilation
 TODO: Testing
@@ -1100,7 +1102,7 @@ def create(
                           f'match the output_processors 0x{layers[ie]["output_processors"]} of '
                           f'the input {ie}')
 
-    # 13 - Clean up unneccessary output_processors
+    # 13 - Clean up unnecessary output_processors
     prev_name = ''
     for (name, ll) in layers.items():
         if prev_name != '':
