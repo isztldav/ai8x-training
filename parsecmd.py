@@ -44,7 +44,7 @@ def get_parser(model_names, dataset_names):
     """
     Return the argument parser
     """
-    parser = argparse.ArgumentParser(description='Image classification model')
+    parser = argparse.ArgumentParser(description='Model')
     parser.add_argument('--device', type=device, default=84,
                         help='set device (default: AI84)')
     parser.add_argument('--8-bit-mode', '-8', dest='act_mode_8bit', action='store_true',
@@ -236,6 +236,12 @@ def get_parser(model_names, dataset_names):
                         help='physically remove zero-filters and create a smaller model')
     parser.add_argument('--sparsity-perf', action='store_true', default=False,
                         help='when determining best epoch, use sparsity as primary key')
+
+    parser.add_argument('--compiler-mode', type=str, default='default',
+                        choices=['none', 'default', 'reduce-overhead', 'max-autotune'],
+                        help='PyTorch compiler optimization mode ("none" to disable)')
+    parser.add_argument('--compiler-backend', type=str, default='inductor',
+                        help='PyTorch compiler backend')
 
     obj_detection_args = parser.add_argument_group('Object Detection Arguments')
     obj_detection_args.add_argument('--enable-obj-detection', '--obj-detection',

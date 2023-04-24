@@ -496,10 +496,24 @@ def main():
                                                               args.epochs)
                 create_nas_kd_policy(model, compression_scheduler, start_epoch, kd_end_epoch, args)
 
+    if args.compiler_mode != 'none':
+        if torch.cuda.is_available():
+            model = torch.compile(model, mode=args.compiler_mode,
+                                  backend=args.compiler_backend)
+            msglogger.info('torch.compile() successful, mode=%s', args.compiler_mode)
+        else:
+            msglogger.info('torch.compile() not available, using "eager" mode')
+
     vloss = 10**6
     for epoch in range(start_epoch, ending_epoch):
         # pylint: disable=unsubscriptable-object
         if qat_policy is not None and epoch > 0 and epoch == qat_policy['start_epoch']:
+            dynamo = hasattr(model, "_orig_mod")
+            if dynamo:
+                model = model._orig_mod  # pylint: disable=protected-access
+
+            msglogger.info('\n')
+            msglogger.info('Initiating quantization aware training (QAT)...')
             # Fuse the BN parameters into conv layers before Quantization Aware Training (QAT)
             ai8x.fuse_bn_layers(model)
 
@@ -508,6 +522,11 @@ def main():
 
             # Model is re-transferred to GPU in case parameters were added
             model.to(args.device)
+
+            if dynamo:
+                model = torch.compile(model, mode=args.compiler_mode,
+                                      backend=args.compiler_backend)
+                msglogger.info('torch.compile() successful, mode=%s', args.compiler_mode)
 
             # Empty the performance scores list for QAT operation
             perf_scores_history = []
