@@ -70,6 +70,10 @@ import numpy as np
 
 import matplotlib
 
+# pylint: disable=wrong-import-position
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"  # Set this before importing PyTorch
+# pylint: enable=wrong-import-position
+
 # TensorFlow 2.x compatibility
 try:
     import tensorboard  # pylint: disable=import-error
@@ -241,7 +245,6 @@ def main():
             # Set default device in case the first one on the list != 0
             torch.cuda.set_device(args.gpus[0])
     else:
-        os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
         args.device = 'mps'
 
     if args.earlyexit_thresholds:
