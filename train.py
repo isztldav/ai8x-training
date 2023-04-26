@@ -500,7 +500,7 @@ def main():
                 create_nas_kd_policy(model, compression_scheduler, start_epoch, kd_end_epoch, args)
 
     if args.compiler_mode != 'none':
-        if args.device != 'cpu' and torch.cuda.is_available():
+        if args.device == 'cuda':
             model = torch.compile(model, mode=args.compiler_mode,
                                   backend=args.compiler_backend)
             msglogger.info('torch.compile() successful, mode=%s', args.compiler_mode)
