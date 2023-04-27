@@ -1,6 +1,6 @@
 # ADI MAX78000/MAX78002 Model Training and Synthesis
 
-April 5, 2023
+April 27, 2023
 
 ADI’s MAX78000/MAX78002 project is comprised of five repositories:
 
@@ -60,8 +60,8 @@ PyTorch operating system and hardware support are constantly evolving. This docu
 
 Full support and documentation are provided for the following platform:
 
-* CPU: 64-bit amd64/x86_64 “PC” with [Ubuntu Linux 20.04 LTS/22.04 LTS](https://ubuntu.com/download/server)
-* GPU for hardware acceleration (optional but highly recommended): Nvidia with [CUDA 11.8](https://developer.nvidia.com/cuda-toolkit-archive)
+* CPU: 64-bit amd64/x86_64 “PC” with [Ubuntu Linux 20.04 LTS or 22.04 LTS](https://ubuntu.com/download/server)
+* GPU for hardware acceleration (optional but highly recommended): Nvidia with [CUDA 11.8](https://developer.nvidia.com/cuda-toolkit-archive) or later
 * [PyTorch 2.0](https://pytorch.org/get-started/locally/) on Python 3.8.x
 
 Limited support and advice for using other hardware and software combinations is available as follows.
@@ -1335,11 +1335,11 @@ GPU 00000000:01:00.0
 
 The main training software is `train.py`. It drives the training aspects, including model creation, checkpointing, model save, and status display (see `--help` for the many supported options, and the `scripts/train_*.sh` scripts for example usage).
 
-The `ai84net.py` and `ai85net.py` files contain models that fit into AI84’s weight memory. These models rely on the MAX78000/MAX78002 hardware operators that are defined in `ai8x.py`.
+The  `models/` folder contains models that fit into the MAX78000 or MAX78002’s  weight memory. These models rely on the MAX78000/MAX78002 hardware operators that are defined in `ai8x.py`.
 
 To train the FP32 model for MNIST on MAX78000 or MAX78002, run `scripts/train_mnist.sh` from the `ai8x-training` project. This script will place checkpoint files into the log directory. Training makes use of the Distiller framework, but the `train.py` software has been modified slightly to improve it and add some MAX78000/MAX78002 specifics.
 
-Since training can take hours or days, the training script does not overwrite any weights previously produced. Results are placed in sub-directories under `logs/` named with the date and time when training began. The latest results are always soft-linked to by `latest-log_dir` and `latest_log_file`.
+Since training can take a significant amount of time, the training script does not overwrite any weights previously produced. Results are placed in sub-directories under `logs/` named with the date and time when training began. The latest results are always soft-linked to by `latest-log_dir` and `latest_log_file`.
 
 #### Troubleshooting
 
@@ -1350,6 +1350,11 @@ Since training can take hours or days, the training script does not overwrite an
    ```shell
    $ scripts/train_mnist.sh --workers=1
    ```
+
+3. On CUDA-capable machines, the training script by default uses PyTorch 2.0’s [`torch.compile()` feature](https://pytorch.org/docs/stable/generated/torch.compile.html) which improves execution speed. However, some models may not support this feature. It can be disabled using the command line option
+   `--compiler-mode none`
+   Disabling `torch.compile()` may also be necessary when using AMD ROCm acceleration.
+
 
 ### Example Training Session
 
@@ -1492,6 +1497,7 @@ The following table describes the most important command line arguments for `tra
 | `--nas`                    | Enable network architecture search                           |                                 |
 | `--nas-policy`             | Define NAS policy in YAML file                               | `--nas-policy nas/nas_policy.yaml` |
 | `--regression` | Select regression instead of classification (changes Loss function, and log output) |  |
+| `--compiler-mode` | Select [TorchDynamo optimization mode](https://pytorch.org/docs/stable/generated/torch.compile.html) (default: enabled on CUDA capable machines) | `--compiler-mode none` |
 | *Display and statistics*   |                                                              |                                 |
 | `--enable-tensorboard`     | Enable logging to TensorBoard (default: disabled)            |                                 |
 | `--confusion`              | Display the confusion matrix                                 |                                 |
