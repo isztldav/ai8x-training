@@ -629,7 +629,8 @@ class QuantizationAwareModule(nn.Module):
             weight_scale = self.calc_weight_scale(out_shift)
             out_scale = self.calc_out_scale(out_shift)
 
-            self.output_shift.data = out_shift.unsqueeze(0)
+            with torch.no_grad():
+                self.output_shift.copy_(out_shift.unsqueeze(0))
 
             weights = self.op.weight.data
             self.op.weight.data = \

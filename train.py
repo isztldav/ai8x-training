@@ -505,7 +505,9 @@ def main():
         if args.device == 'cuda':
             model = torch.compile(model, mode=args.compiler_mode,
                                   backend=args.compiler_backend)
-            msglogger.info('torch.compile() successful, mode=%s', args.compiler_mode)
+            msglogger.info('torch.compile() successful, mode=%s, cache limit=%d',
+                           args.compiler_mode, torch._dynamo.config.cache_size_limit)
+            torch._dynamo.config.log_level = logging.WARNING
         else:
             msglogger.info('torch.compile() not available, using "eager" mode')
 
@@ -529,9 +531,11 @@ def main():
             model.to(args.device)
 
             if dynamo:
+                torch._dynamo.reset()
                 model = torch.compile(model, mode=args.compiler_mode,
                                       backend=args.compiler_backend)
-                msglogger.info('torch.compile() successful, mode=%s', args.compiler_mode)
+                msglogger.info('torch.compile() successful, mode=%s, cache limit=%d',
+                               args.compiler_mode, torch._dynamo.config.cache_size_limit)
 
             # Empty the performance scores list for QAT operation
             perf_scores_history = []
@@ -1733,7 +1737,7 @@ def save_collectors_data(collectors, directory):
 
 def update_old_model_params(model_path, model_new):
     """Adds missing model parameters added with default values.
-    This is mainly due to the saved checkpoint is from previous versions of the repo.
+    This is mainly due to the saved checkpoints from previous versions of the repo.
     New model is saved to `model_path` and the old model copied into the same file_path with
     `__obsolete__` prefix."""
     is_model_old = False
