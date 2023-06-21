@@ -556,6 +556,8 @@ class QuantizationAwareModule(nn.Module):
 
         self.pool = pool
         self.op = op
+        if op is not None and not hasattr(self, '_conv_forward'):
+            self._conv_forward = op._conv_forward  # pylint: disable=protected-access
         self.bn = bn
         self.pooling = pooling
 
@@ -632,19 +634,12 @@ class QuantizationAwareModule(nn.Module):
             with torch.no_grad():
                 self.output_shift.copy_(out_shift.unsqueeze(0))
 
-            weights = self.op.weight.data
-            self.op.weight.data = \
-                self.clamp_weight(self.quantize_weight(self.op.weight.mul(weight_scale)))
-            if self.op.bias is not None:
-                biases = self.op.bias.data
-                self.op.bias.data = \
-                    self.clamp_bias(self.quantize_bias(self.op.bias.mul(weight_scale)))
-
-            x = self.op(x)
-
-            self.op.weight.data = weights
-            if self.op.bias is not None:
-                self.op.bias.data = biases
+            x = self._conv_forward(  # pylint: disable=protected-access
+                x,
+                self.clamp_weight(self.quantize_weight(self.op.weight.mul(weight_scale))),
+                None if self.op.bias is None
+                else self.clamp_bias(self.quantize_bias(self.op.bias.mul(weight_scale))),
+            )
 
             if self.bn is not None:
                 x = self.bn(x).div(4.)
@@ -1035,6 +1030,15 @@ class ConvTranspose2d(Conv2d):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, op='ConvTranspose2d', **kwargs)
 
+    def _conv_forward(self, x, weight, bias):  # pylint: disable=method-hidden
+        output_padding = self.op._output_padding(  # pylint: disable=protected-access
+            x, None, self.op.stride, self.op.padding,  # type: ignore[arg-type]
+            self.op.kernel_size, 2, self.op.dilation)  # type: ignore[arg-type]
+
+        return nn.functional.conv_transpose2d(  # pylint: disable=method-hidden
+            x, weight, bias, self.op.stride, self.op.padding,
+            output_padding, self.op.groups, self.op.dilation)
+
 
 class FusedMaxPoolConvTranspose2d(ConvTranspose2d):
     """
@@ -1182,6 +1186,9 @@ class Linear(QuantizationAwareModule):
         self.op.padding = None
         self.op.dilation = None
         self.op.groups = None
+
+    def _conv_forward(self, x, weight, bias):  # pylint: disable=method-hidden
+        return nn.functional.linear(x, weight, bias)
 
 
 class FusedLinearReLU(Linear):

@@ -7,7 +7,8 @@
 # https://www.maximintegrated.com/en/aboutus/legal/copyrights.html
 #
 ###################################################################################################
-# pyright: reportMissingModuleSource=false
+# pyright: reportMissingModuleSource=false, reportGeneralTypeIssues=false
+# pyright: reportOptionalSubscript=false
 #
 # Portions Copyright (c) 2018 Intel Corporation
 #
@@ -505,9 +506,12 @@ def main():
         if args.device == 'cuda':
             model = torch.compile(model, mode=args.compiler_mode,
                                   backend=args.compiler_backend)
-            msglogger.info('torch.compile() successful, mode=%s, cache limit=%d',
-                           args.compiler_mode, torch._dynamo.config.cache_size_limit)
-            torch._dynamo.config.log_level = logging.WARNING
+            msglogger.info(
+                'torch.compile() successful, mode=%s, cache limit=%d',
+                args.compiler_mode,
+                torch._dynamo.config.cache_size_limit,  # pylint: disable=protected-access
+            )
+            torch._dynamo.config.log_level = logging.WARNING  # pylint: disable=protected-access
         else:
             msglogger.info('torch.compile() not available, using "eager" mode')
 
@@ -531,11 +535,14 @@ def main():
             model.to(args.device)
 
             if dynamo:
-                torch._dynamo.reset()
+                torch._dynamo.reset()  # pylint: disable=protected-access
                 model = torch.compile(model, mode=args.compiler_mode,
                                       backend=args.compiler_backend)
-                msglogger.info('torch.compile() successful, mode=%s, cache limit=%d',
-                               args.compiler_mode, torch._dynamo.config.cache_size_limit)
+                msglogger.info(
+                    'torch.compile() successful, mode=%s, cache limit=%d',
+                    args.compiler_mode,
+                    torch._dynamo.config.cache_size_limit,  # pylint: disable=protected-access
+                )
 
             # Empty the performance scores list for QAT operation
             perf_scores_history = []
@@ -1112,8 +1119,11 @@ def _validate(data_loader, model, criterion, loggers, args, epoch=-1, tflogger=N
                 output = (output_boxes, output_conf)
 
                 if boxes_list:
-                    m = model._orig_mod if hasattr(torch, '_dynamo') \
-                            and isinstance(model, torch._dynamo.OptimizedModule) else model
+                    m = model._orig_mod if hasattr(  # pylint: disable=protected-access
+                            torch, '_dynamo') and isinstance(
+                                model,
+                                torch._dynamo.OptimizedModule  # pylint: disable=protected-access
+                            ) else model
                     # .module is added to model for access in multi GPU environments
                     # as https://github.com/pytorch/pytorch/issues/16885 has not been merged yet
                     m = m.module if isinstance(m, nn.DataParallel) else m
