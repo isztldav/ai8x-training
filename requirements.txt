@@ -8,7 +8,7 @@ tk>=0.1.0
 torch==2.0.1
 torchvision==0.15.2
 torchaudio==2.0.2
-tensorboard~=2.11.0
+tensorboard~=2.13.0
 protobuf>=3.19.0,<4.0
 numba>=0.56.4
 opencv-python>=4.6.0

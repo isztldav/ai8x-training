@@ -8,7 +8,7 @@ tk>=0.1.0
 https://download.pytorch.org/whl/rocm5.4.2/torch-2.0.1%2Brocm5.4.2-cp38-cp38-linux_x86_64.whl
 https://download.pytorch.org/whl/rocm5.4.2/torchvision-0.15.2%2Brocm5.4.2-cp38-cp38-linux_x86_64.whl
 torchaudio==2.0.2
-tensorboard~=2.11.0
+tensorboard~=2.13.0
 protobuf>=3.19.0,<4.0
 numba>=0.56.4
 opencv-python>=4.6.0
