@@ -247,7 +247,11 @@ def main():
             # Set default device in case the first one on the list != 0
             torch.cuda.set_device(args.gpus[0])
     else:
-        args.device = 'mps'
+        if os.uname().release < '22.3.0':
+            print("WARNING: mps disabled, update macOS to Ventura 13.4 or later for mps support")
+            args.device = 'cpu'
+        else:
+            args.device = 'mps'
 
     if args.earlyexit_thresholds:
         args.num_exits = len(args.earlyexit_thresholds) + 1
